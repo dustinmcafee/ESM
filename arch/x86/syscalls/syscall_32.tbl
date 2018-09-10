@@ -361,3 +361,8 @@
 # 352	i386	sched_getattr		sys_sched_getattr
 # 353	i386	renameat2		sys_renameat2
 354	i386	seccomp			sys_seccomp
+385     i386    esm_register            sys_esm_register
+386     i386    esm_wait                sys_esm_wait
+387     i386    esm_register1           sys_esm_register1
+388     i386    esm_wait1               sys_esm_wait1
+

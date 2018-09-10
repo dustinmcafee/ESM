@@ -146,6 +146,11 @@ handle_irq_event_percpu(struct irq_desc *desc, struct irqaction *action)
 			      irq, action->handler))
 			local_irq_disable();
 
+                //Added for ESM Debugging
+                if(irq == 12){
+                        pr_debug("Mouse interrupt in handle.c\n");
+                }
+
 		switch (res) {
 		case IRQ_WAKE_THREAD:
 			/*

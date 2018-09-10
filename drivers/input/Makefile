@@ -28,3 +28,7 @@ obj-$(CONFIG_INPUT_APMPOWER)	+= apm-power.o
 obj-$(CONFIG_INPUT_KEYRESET)	+= keyreset.o
 obj-$(CONFIG_INPUT_KEYCOMBO)	+= keycombo.o
 
+#Added for ESM Debugging (pr_debug())
+CFLAGS_mousedev.o := -DDEBUG
+CFLAGS_evdev.o := -DDEBUG
+

@@ -142,19 +142,20 @@ print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq);
 #define TASK_RUNNING		0
 #define TASK_INTERRUPTIBLE	1
 #define TASK_UNINTERRUPTIBLE	2
-#define __TASK_STOPPED		4
-#define __TASK_TRACED		8
+#define TASK_EV_WAIT		4		//Added for ESM
+#define __TASK_STOPPED		8
+#define __TASK_TRACED		16
 /* in tsk->exit_state */
-#define EXIT_ZOMBIE		16
-#define EXIT_DEAD		32
+#define EXIT_ZOMBIE		32
+#define EXIT_DEAD		64
 /* in tsk->state again */
-#define TASK_DEAD		64
-#define TASK_WAKEKILL		128
-#define TASK_WAKING		256
-#define TASK_PARKED		512
-#define TASK_STATE_MAX		1024
+#define TASK_DEAD		128
+#define TASK_WAKEKILL		256
+#define TASK_WAKING		512
+#define TASK_PARKED		1024
+#define TASK_STATE_MAX		2048
 
-#define TASK_STATE_TO_CHAR_STR "RSDTtZXxKWP"
+#define TASK_STATE_TO_CHAR_STR "RSDETtZXxKWP"
 
 extern char ___assert_task_state[1 - 2*!!(
 		sizeof(TASK_STATE_TO_CHAR_STR)-1 != ilog2(TASK_STATE_MAX)+1)];
@@ -165,7 +166,7 @@ extern char ___assert_task_state[1 - 2*!!(
 #define TASK_TRACED		(TASK_WAKEKILL | __TASK_TRACED)
 
 /* Convenience macros for the sake of wake_up */
-#define TASK_NORMAL		(TASK_INTERRUPTIBLE | TASK_UNINTERRUPTIBLE)
+#define TASK_NORMAL		(TASK_INTERRUPTIBLE | TASK_UNINTERRUPTIBLE | TASK_EV_WAIT)      //Added for ESM; TODO:Should I add to TASK_ALL instead?
 #define TASK_ALL		(TASK_NORMAL | __TASK_STOPPED | __TASK_TRACED)
 
 /* get_task_state() */
@@ -307,6 +308,7 @@ extern signed long schedule_timeout(signed long timeout);
 extern signed long schedule_timeout_interruptible(signed long timeout);
 extern signed long schedule_timeout_killable(signed long timeout);
 extern signed long schedule_timeout_uninterruptible(signed long timeout);
+asmlinkage int esm_context_switch(struct task_struct* next);
 asmlinkage void schedule(void);
 extern void schedule_preempt_disabled(void);
 
@@ -1032,6 +1034,13 @@ enum perf_event_task_context {
 	perf_nr_task_contexts,
 };
 
+//Added for ESM
+struct event_queue_t {
+	spinlock_t lock;
+        struct list_head event_queue;
+        struct input_value* event;
+};
+
 struct task_struct {
 	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
 	void *stack;
@@ -1227,6 +1236,8 @@ struct task_struct {
 	void *notifier_data;
 	sigset_t *notifier_mask;
 	struct callback_head *task_works;
+
+        struct list_head event_queue;                   //Added for ESM
 
 	struct audit_context *audit_context;
 #ifdef CONFIG_AUDITSYSCALL

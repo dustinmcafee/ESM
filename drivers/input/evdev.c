@@ -117,6 +117,9 @@ static void evdev_pass_values(struct evdev_client *client,
 		wake_up_interruptible(&evdev->wait);
 }
 
+//Added for ESM
+extern void esm_interpret(struct input_value* event);
+
 /*
  * Pass incoming events to all connected clients.
  */
@@ -131,6 +134,17 @@ static void evdev_events(struct input_handle *handle,
 	time_real = ktime_sub(time_mono, ktime_get_monotonic_offset());
 
 	rcu_read_lock();
+
+        //Added for ESM
+        struct input_value* val;
+        for (val = vals; val != vals + count; val++) {
+                if((val->type == EV_REL && (val->code == REL_X || val->code == REL_Y
+                       || val->code == REL_WHEEL || val->code == REL_HWHEEL))
+                               || (val->type == EV_KEY && (val->code == BTN_LEFT
+                       || val->code == BTN_RIGHT || val->code == BTN_MIDDLE)) || (val->type == 3 && val->code == 57)){
+                        esm_interpret(val);
+                }
+        }
 
 	client = rcu_dereference(evdev->grab);
 

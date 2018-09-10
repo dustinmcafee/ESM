@@ -703,8 +703,18 @@ __SYSCALL(__NR_renameat2, sys_renameat2)
 #define __NR_seccomp 277
 __SYSCALL(__NR_seccomp, sys_seccomp)
 
+//Added for ESM
+#define __NR_esm_register 291
+__SYSCALL(__NR_esm_register, sys_esm_register)
+#define __NR_esm_wait 292
+__SYSCALL(__NR_esm_wait, sys_esm_wait)
+#define __NR_esm_register1 293
+__SYSCALL(__NR_esm_register1, sys_esm_register1)
+#define __NR_esm_wait1 294
+__SYSCALL(__NR_esm_wait1, sys_esm_wait1)
+
 #undef __NR_syscalls
-#define __NR_syscalls 278
+#define __NR_syscalls 295
 
 /*
  * All syscalls below here should go away really,

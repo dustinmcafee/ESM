@@ -212,3 +212,10 @@ cond_syscall(sys_kcmp);
 
 /* operate on Secure Computing state */
 cond_syscall(sys_seccomp);
+
+//Added for ESM
+cond_syscall(sys_esm_register);
+cond_syscall(sys_esm_wait);
+cond_syscall(sys_esm_register1);
+cond_syscall(sys_esm_wait1);
+

@@ -38,7 +38,8 @@ typedef enum {MOUSE_RELATIVE_X,
 typedef struct {
 	spinlock_t lock;
 	struct list_head list;
-	event_handler_t event_handler;
+//	event_handler_t event_handler;
+	int event_handler;
 	struct task_struct* task;
 	esm_event_t event_keycode;
 }application_l;
@@ -64,9 +65,11 @@ typedef struct {
 
 application_l* handlers_for_event(esm_event_t keycode);
 
-int esm_register(pid_t pid, __u16 type, __u16 code, event_handler_t event_handler);
+//int esm_register(pid_t pid, __u16 type, __u16 code, event_handler_t event_handler);
+int esm_register(pid_t pid, __u16 type, __u16 code, int event_handler);
 
-int esm_register1(pid_t pid, __u16 type, __u16 code, event_handler_t event_handler);
+//int esm_register1(pid_t pid, __u16 type, __u16 code, event_handler_t event_handler);
+int esm_register1(pid_t pid, __u16 type, __u16 code, int event_handler);
 
 int esm_dispatch(struct input_value* event, struct task_struct* task);
 

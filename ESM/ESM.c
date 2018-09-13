@@ -167,7 +167,8 @@ esm_event_t esm_keycode_from_input(__u16 type, __u16 code){
         return event_keycode;
 }
 
-int esm_register(pid_t pid, __u16 type, __u16 code, __user event_handler_t event_handler_user) {
+//int esm_register(pid_t pid, __u16 type, __u16 code, __user event_handler_t event_handler_user) {
+int esm_register(pid_t pid, __u16 type, __u16 code, int event_handler) {
 	//If event_handler == NULL
 	//	delete application_list[event][application]
 	//else
@@ -177,7 +178,7 @@ int esm_register(pid_t pid, __u16 type, __u16 code, __user event_handler_t event
 	struct task_struct* task;
 	esm_event_t event_keycode;
 
-	event_handler_t event_handler = event_handler_user;
+//	event_handler_t event_handler = event_handler_user;
 	task = current;
 
 	printk(KERN_WARNING "esm_register: %d\n", task->pid);
@@ -218,7 +219,8 @@ int esm_register(pid_t pid, __u16 type, __u16 code, __user event_handler_t event
 	return 0;
 }
 
-int esm_register1(pid_t pid, __u16 type, __u16 code, __user event_handler_t event_handler) {
+//int esm_register1(pid_t pid, __u16 type, __u16 code, __user event_handler_t event_handler) {
+int esm_register1(pid_t pid, __u16 type, __u16 code, int event_handler) {
 	return esm_register(pid, type, code, event_handler);
 }
 
@@ -231,9 +233,11 @@ int esm_dispatch(struct input_value* event, struct task_struct* task){
 	//	application.enqueue(event);
 	application_l *application_category;
 	esm_event_t ev_keycode;
-//	struct task_struct* prev;
+	struct pt_regs *regs;
 	struct event_queue_t* event_queue_item;
 	int dbg_pid = task->pid;
+	struct thread_info* task_info = task_thread_info(task);
+	int task_cpu = task_info->cpu;
 
 	printk(KERN_WARNING "esm_dispatch pid: %d\n", dbg_pid);
 
@@ -260,17 +264,26 @@ int esm_dispatch(struct input_value* event, struct task_struct* task){
 					printk(KERN_WARNING "esm_dispatch has waken up process: %d\n", dbg_pid);
 					printk(KERN_WARNING "esm_dispatch: process: %d is in state: %ld\n", dbg_pid, task->state);
 
-					//Context Switch Function Here.
-//					prev = current;
-//					switch_to(prev, task, prev);
-					if(esm_context_switch(task) < 0){
-						printk(KERN_WARNING "esm_context_switch error");
-					}
-//					application->event_handler(event->type, event->code, event->value);	//TODO:Fails here. How to call userspace function?
-					//Force a Context Switch here...Change esp to new return address. Possibly add input_event arguements to esp+8?
-					struct pt_regs *regs = task_pt_regs(task);
-//					regs->cr_iip = application->event_handler;
-					regs->ip = application->event_handler;
+					//Call handler (not like this but to the effect): application->event_handler(event->type, event->code, event->value);
+					//TODO:Fails here. How to call userspace function?
+					/**
+					According to the ABI, the first 6 integer or pointer arguments to a function are passed in registers.
+					The first is placed in edi/rdi, the second in esi/rsi, the third in edx/rdx, and then ecx/rcx, r8 and r9.
+					Only the 7th argument and onwards are passed on the stack. Should be at ebp+8 and on (8 byte aligned).
+					The return address that should be set to the event_handler should be at ebp+4 of the correct stack frame.
+					**/
+					//Call handler (not like this but to the effect): application->event_handler(event->type, event->code, event->value);
+					//user stack pointer: task->thread->usersp
+					regs = task_pt_regs(task);
+//					regs->bp = *(application->event_handler);
+					int ebp = &(regs->bp);
+					int i = 10;
+					do{
+						printk(KERN_WARNING "BASE POINTER %d: 0x%010x\n", i, ebp);
+						ebp = &ebp;
+						i--;
+					} while (i > 0);
+
 
 				}else{
 					pr_err("esm_dispatch can not wake up process %d, already running\n", dbg_pid);
@@ -285,7 +298,7 @@ int esm_dispatch(struct input_value* event, struct task_struct* task){
 
 		event_queue_item = kmalloc(sizeof(struct event_queue_t*), GFP_KERNEL);
 
-//		spin_lock(&event_queue_item->lock);	//causes deadlock
+//		spin_lock(&event_queue_item->lock);	//causes deadlock, because there is a lock before dispatch call
 
 		event_queue_item->event = event;
 		list_add(&(event_queue_item->event_queue), &(task->event_queue));

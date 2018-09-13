@@ -308,7 +308,7 @@ extern signed long schedule_timeout(signed long timeout);
 extern signed long schedule_timeout_interruptible(signed long timeout);
 extern signed long schedule_timeout_killable(signed long timeout);
 extern signed long schedule_timeout_uninterruptible(signed long timeout);
-asmlinkage int esm_context_switch(struct task_struct* next);
+asmlinkage int esm_context_switch(struct task_struct* next);			//Added for ESM
 asmlinkage void schedule(void);
 extern void schedule_preempt_disabled(void);
 

@@ -1,4 +1,4 @@
-/*
+/**
  * Event Stream Model (ESM): Push model for input events.
  * Currently only works for certain mouse events.
  *
@@ -7,7 +7,7 @@
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as published by
  * the Free Software Foundation.
- */
+ **/
 
 
 #include <linux/input.h>
@@ -181,7 +181,7 @@ int esm_register(pid_t pid, __u16 type, __u16 code, int event_handler) {
 //	event_handler_t event_handler = event_handler_user;
 	task = current;
 
-	printk(KERN_WARNING "esm_register: %d\n", task->pid);
+	printk(KERN_WARNING "esm_register (pid: %d), (handler: 0x%08x)\n", task->pid, event_handler);
 	if(task == NULL){
 		pr_err("Can not esm_register, task is NULL\n");
 		return -EINVAL;
@@ -195,7 +195,8 @@ int esm_register(pid_t pid, __u16 type, __u16 code, int event_handler) {
 
 	application_category = handlers_for_event(event_keycode);
 	spin_lock(&application_category->lock);
-	if(event_handler == NULL){
+//	if(event_handler == NULL){
+	if(event_handler == 0){
 		list_for_each_safe(pos, q, &(application_category->list)){
 			application = list_entry(pos, application_l, list);
 			if(application->event_handler == event_handler){
@@ -224,6 +225,50 @@ int esm_register1(pid_t pid, __u16 type, __u16 code, int event_handler) {
 	return esm_register(pid, type, code, event_handler);
 }
 
+//Call handler (not like this but to the effect): application->event_handler(event->type, event->code, event->value);
+//TODO:Fails here. How to call userspace function?
+/**
+According to the ABI, the first 6 integer or pointer arguments to a function are passed in registers.
+The first is placed in edi/rdi, the second in esi/rsi, the third in edx/rdx, and then ecx/rcx, r8 and r9.
+Only the 7th argument and onwards are passed on the stack. Should be at ebp+8 and on (8 byte aligned).
+The return address that should be set to the event_handler should be at ebp+4 of the correct stack frame.
+"movl [handler], %%eax\n\t"
+"call *%eax\n\t"
+
+
+**/
+
+
+#ifdef CONFIG_X86_32
+#define handle_event(handler_address, err)				\
+do {									\
+	asm volatile("pushfl\n\t"		/* save    flags */	\
+		     "pushl %%ebp\n\t"		/* save    EBP   */	\
+		     "movl %%esp,%%ebp\n\t"	/* save    ESP   */	\
+                     "subl $56, %%esp\n\t"	/* pad the stack */	\
+                     "call %0\n\t"		/* handler call  */	\
+                     "movl $0, %%eax\n\t"	/* move 0 to eax */	\
+                     "addl $56, %%esp\n\t"	/* move esp back */	\
+                     "popl %%ebp\n\t"		/* restore ebp   */	\
+                     "popfl\n"			/* restore flags */	\
+                     : "=i" (err) : "m" (handler_address));		\
+} while (0)
+
+#else
+
+#define handle_event(handler_address, err)				\
+	asm volatile("pushf\n\t"		/* save    flags */	\
+		     "pushq %%rbp\n\t"		/* save    RBP   */	\
+		     "movq %%rsp,%%rbp\n\t"	/* save    RSP   */	\
+                     "subq $56, %%rsp\n\t"	/* pad the stack */	\
+                     "call *%[handler]\n\t"	/* handler call  */	\
+                     "movq $0, %%rax\n\t"	/* move 0 to rax */	\
+                     "addq $56, %%rsp\n\t"	/* move rsp back */	\
+                     "popq %%rbp\n\t"		/* pop rbp       */	\
+                     : "=r" (err) : [handler] "m" (handler_address));
+#endif
+
+
 int esm_dispatch(struct input_value* event, struct task_struct* task){
 	//If task->state == TASK_EV_WAIT
 	//	task->state = TASK_RUNNUNG
@@ -234,10 +279,12 @@ int esm_dispatch(struct input_value* event, struct task_struct* task){
 	application_l *application_category;
 	esm_event_t ev_keycode;
 	struct pt_regs *regs;
+	int* handler_address;
 	struct event_queue_t* event_queue_item;
 	int dbg_pid = task->pid;
-	struct thread_info* task_info = task_thread_info(task);
-	int task_cpu = task_info->cpu;
+	int err_out = 0;
+//	struct thread_info* task_info = task_thread_info(task);
+//	int task_cpu = task_info->cpu;
 
 	printk(KERN_WARNING "esm_dispatch pid: %d\n", dbg_pid);
 
@@ -254,36 +301,39 @@ int esm_dispatch(struct input_value* event, struct task_struct* task){
 			return -EINVAL;
 		}
 
+		//For each handler of application
 		list_for_each(pos, &(application_category->list)){
 			application = list_entry(pos, application_l, list);
 			if(application->task->pid == dbg_pid){
-				printk(KERN_WARNING "esm_dispatch attempting to wake up process: %d\n", dbg_pid);
 
+				printk(KERN_WARNING "esm_dispatch is adding the registered event to event queue, pid: %d\n", dbg_pid);
+				event_queue_item = kmalloc(sizeof(struct event_queue_t*), GFP_KERNEL);
+				event_queue_item->event = event;
+				list_add(&(event_queue_item->event_queue), &(task->event_queue));
+
+
+				printk(KERN_WARNING "esm_dispatch attempting to wake up process: %d\n", dbg_pid);
 				if(wake_up_state(task, TASK_EV_WAIT) == 1){	//Less overhead to directly assign task->state = TASK_RUNNING
 
 					printk(KERN_WARNING "esm_dispatch has waken up process: %d\n", dbg_pid);
 					printk(KERN_WARNING "esm_dispatch: process: %d is in state: %ld\n", dbg_pid, task->state);
 
 					//Call handler (not like this but to the effect): application->event_handler(event->type, event->code, event->value);
-					//TODO:Fails here. How to call userspace function?
-					/**
-					According to the ABI, the first 6 integer or pointer arguments to a function are passed in registers.
-					The first is placed in edi/rdi, the second in esi/rsi, the third in edx/rdx, and then ecx/rcx, r8 and r9.
-					Only the 7th argument and onwards are passed on the stack. Should be at ebp+8 and on (8 byte aligned).
-					The return address that should be set to the event_handler should be at ebp+4 of the correct stack frame.
-					**/
-					//Call handler (not like this but to the effect): application->event_handler(event->type, event->code, event->value);
 					//user stack pointer: task->thread->usersp
 					regs = task_pt_regs(task);
-//					regs->bp = *(application->event_handler);
-					int ebp = &(regs->bp);
-					int i = 10;
+					int* ebp = regs->bp;
+					int i = 3;
 					do{
-						printk(KERN_WARNING "BASE POINTER %d: 0x%010x\n", i, ebp);
+						printk(KERN_WARNING "BASE POINTER %d: 0x%08x\n", i, ebp);
 						ebp = &ebp;
 						i--;
 					} while (i > 0);
 
+					handler_address = (int*)(application->event_handler);
+					printk(KERN_WARNING "HANDLER ADDRESS: 0x%08x\n", handler_address);
+//					handler_address = application->event_handler;
+//					handle_event(&handler_address, err_out);
+//					printk(KERN_WARNING "handle_event_out: %d\n", err_out);
 
 				}else{
 					pr_err("esm_dispatch can not wake up process %d, already running\n", dbg_pid);
@@ -293,7 +343,8 @@ int esm_dispatch(struct input_value* event, struct task_struct* task){
 				printk(KERN_WARNING "esm_dispatch could not dicipher the task struct from the list, pid: %d\n", application->task->pid);
 			}
 		}
-	} else {
+/*	} else {
+
 		printk(KERN_WARNING "esm_dispatch is adding the registered event to event queue, pid: %d\n", dbg_pid);
 
 		event_queue_item = kmalloc(sizeof(struct event_queue_t*), GFP_KERNEL);
@@ -304,11 +355,57 @@ int esm_dispatch(struct input_value* event, struct task_struct* task){
 		list_add(&(event_queue_item->event_queue), &(task->event_queue));
 
 //		spin_unlock(&event_queue_item->lock);
+*/
 	}
 
 	spin_unlock(&application_category->lock);
 	return 0;
 }
+
+int _handle_events(struct task_struct* task){
+	application_l *application_category, *application;
+	esm_event_t ev_keycode;
+	struct list_head *pos_one, *pos_two, *q;
+	struct event_queue_t* ev_queue;
+	struct input_value* event;
+	int* handler_address = NULL;
+	int err, err_out = 0;
+
+	if(list_empty(&(task->event_queue))){
+		printk(KERN_WARNING "No events to handle, pid: %d\n", task->pid);
+		return -1;
+	}
+
+	//For each event
+	list_for_each_safe(pos_one, q, &(task->event_queue)){
+		printk(KERN_WARNING "Handling events, pid: %d\n", task->pid);
+		ev_queue = list_entry(pos_one, struct event_queue_t, event_queue);
+		event = ev_queue->event;
+		ev_keycode = esm_keycode_from_input(event->type, event->code);
+		application_category = handlers_for_event(ev_keycode);
+
+		// For each handler of same event
+		spin_lock(&application_category->lock);
+		list_for_each(pos_two, &(application_category->list)){
+			application = list_entry(pos_two, application_l, list);
+			if(application->task->pid == task->pid && ev_keycode == application->event_keycode){
+				handler_address = (int*)(application->event_handler);
+				printk(KERN_WARNING "HANDLER ADDRESS: 0x%08x\n", handler_address);
+				handle_event(handler_address, err_out);			// TODO: Does not work (Valid Handler Address?)
+			}
+		}
+		spin_unlock(&application_category->lock);
+
+		// Remove handled event from queue
+		printk(KERN_WARNING "Removing handled event from pid: %d\n", task->pid);
+		spin_lock(&ev_queue->lock);
+		list_del(pos_one);
+		kfree(ev_queue);
+		spin_unlock(&ev_queue->lock);
+	}
+	return err;
+}
+
 
 int esm_wait(pid_t pid){
 //	if(task->event_queue.empty()){
@@ -319,10 +416,10 @@ int esm_wait(pid_t pid){
 //		esm_dispatch(event, task);
 //	}
 
-	struct list_head *pos, *q;
-	struct event_queue_t* ev_queue;
-	struct input_value* event;
+	esm_event_t ev_keycode;
 	struct task_struct* task;
+//	int handler_address;
+	int* handler_address;
 	int err = 0;
 
 	printk(KERN_WARNING "esm_wait: %d\n", pid);
@@ -336,18 +433,10 @@ int esm_wait(pid_t pid){
 	if(list_empty(&(task->event_queue))){
 		printk(KERN_WARNING "esm_wait: event_queue is empty, scheduling task\n");
 		schedule();
-	}else{
-		list_for_each_safe(pos, q, &(task->event_queue)){
-			printk(KERN_WARNING "esm_wait: event_queue is not empty, scheduling event\n");
-			ev_queue = list_entry(pos, struct event_queue_t, event_queue);
-			spin_lock(&ev_queue->lock);
-			event = ev_queue->event;
-			err = esm_dispatch(event, task);
-			list_del(pos);
-			kfree(ev_queue);
-			spin_unlock(&ev_queue->lock);
-		}
 	}
+
+	err = _handle_events(task);
+
 	return err;
 }
 

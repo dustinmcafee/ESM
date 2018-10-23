@@ -39,7 +39,7 @@ typedef struct {
 	spinlock_t lock;
 	struct list_head list;
 //	event_handler_t event_handler;
-	int event_handler;
+	phys_addr_t event_handler;
 	struct task_struct* task;
 	esm_event_t event_keycode;
 }application_l;

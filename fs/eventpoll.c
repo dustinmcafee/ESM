@@ -1032,7 +1032,7 @@ static int ep_poll_callback(wait_queue_t *wait, unsigned mode, int sync, void *k
 		list_add_tail(&epi->rdllink, &ep->rdllist);
 		ep_pm_stay_awake_rcu(epi);
 	}
-
+//Added for ESM: Wake up the polling loop
 	/*
 	 * Wake up ( if active ) both the eventpoll wait list and the ->poll()
 	 * wait list.
@@ -1588,6 +1588,7 @@ fetch_events:
 		init_waitqueue_entry(&wait, current);
 		__add_wait_queue_exclusive(&ep->wq, &wait);
 
+		//Added for ESM: Schedule instead of infinite loop?
 		for (;;) {
 			/*
 			 * We don't want to sleep if the ep_poll_callback() sends us

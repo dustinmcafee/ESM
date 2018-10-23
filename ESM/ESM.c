@@ -34,47 +34,47 @@
 
 application_l mouse_rel_x_handlers = {
 	.list = LIST_HEAD_INIT(mouse_rel_x_handlers.list),
-	.event_handler = NULL,
+	.event_handler = 0,
 	.event_keycode = APPLICATION_LIST_SIZE
 };
 application_l mouse_rel_y_handlers = {
 	.list = LIST_HEAD_INIT(mouse_rel_y_handlers.list),
-	.event_handler = NULL,
+	.event_handler = 0,
 	.event_keycode = APPLICATION_LIST_SIZE
 };
 application_l mouse_rel_wheel_handlers = {
 	.list = LIST_HEAD_INIT(mouse_rel_wheel_handlers.list),
-	.event_handler = NULL,
+	.event_handler = 0,
 	.event_keycode = APPLICATION_LIST_SIZE
 };
 application_l mouse_rel_hwheel_handlers = {
 	.list = LIST_HEAD_INIT(mouse_rel_hwheel_handlers.list),
-	.event_handler = NULL,
+	.event_handler = 0,
 	.event_keycode = APPLICATION_LIST_SIZE
 };
 application_l mouse_btn_left_handlers = {
 	.list = LIST_HEAD_INIT(mouse_btn_left_handlers.list),
-	.event_handler = NULL,
+	.event_handler = 0,
 	.event_keycode = APPLICATION_LIST_SIZE
 };
 application_l mouse_btn_right_handlers = {
 	.list = LIST_HEAD_INIT(mouse_btn_right_handlers.list),
-	.event_handler = NULL,
+	.event_handler = 0,
 	.event_keycode = APPLICATION_LIST_SIZE
 };
 application_l mouse_btn_middle_handlers = {
 	.list = LIST_HEAD_INIT(mouse_btn_middle_handlers.list),
-	.event_handler = NULL,
+	.event_handler = 0,
 	.event_keycode = APPLICATION_LIST_SIZE
 };
 application_l emu_mouse_btn_left_handlers = {
 	.list = LIST_HEAD_INIT(emu_mouse_btn_left_handlers.list),
-	.event_handler = NULL,
+	.event_handler = 0,
 	.event_keycode = APPLICATION_LIST_SIZE
 };
 application_l no_handlers = {
 	.list = LIST_HEAD_INIT(no_handlers.list),
-	.event_handler = NULL,
+	.event_handler = 0,
 	.event_keycode = APPLICATION_LIST_SIZE
 };
 
@@ -91,9 +91,9 @@ application_list_t application_list = {
 };
 
 esm_tasklet_data tasklet_data = {
-	.code = NULL,
-	.type = NULL,
-	.value = NULL,
+	.code = 0,
+	.type = 0,
+	.value = 0,
 	.task = NULL
 };
 
@@ -177,11 +177,14 @@ int esm_register(pid_t pid, __u16 type, __u16 code, int event_handler) {
 	struct list_head *pos, *q;
 	struct task_struct* task;
 	esm_event_t event_keycode;
+	phys_addr_t physical_handler_address;
 
 //	event_handler_t event_handler = event_handler_user;
+	physical_handler_address = virt_to_phys(event_handler);
 	task = current;
 
-	printk(KERN_WARNING "esm_register (pid: %d), (handler: 0x%08x)\n", task->pid, event_handler);
+	printk(KERN_WARNING "esm_register (pid: %d), (handler virtual address: 0x%08x)\n", task->pid, event_handler);
+	printk(KERN_WARNING "esm_register (pid: %d), (handler physical address: 0x%012x)\n", task->pid, physical_handler_address);
 	if(task == NULL){
 		pr_err("Can not esm_register, task is NULL\n");
 		return -EINVAL;
@@ -199,7 +202,8 @@ int esm_register(pid_t pid, __u16 type, __u16 code, int event_handler) {
 	if(event_handler == 0){
 		list_for_each_safe(pos, q, &(application_category->list)){
 			application = list_entry(pos, application_l, list);
-			if(application->event_handler == event_handler){
+//			if(application->event_handler == event_handler){
+			if(application->event_handler == physical_handler_address){
 				list_del(pos);
 			}
 			kfree(application);
@@ -211,7 +215,8 @@ int esm_register(pid_t pid, __u16 type, __u16 code, int event_handler) {
 
 		application->event_keycode = event_keycode;
 		application->task = task;
-		application->event_handler = event_handler;
+//		application->event_handler = event_handler;
+		application->event_handler = physical_handler_address;
 
 		//Add application (event_handler) to corresponding application list (list of categorized event handlers)
 		list_add(&(application->list), &(application_category->list));
@@ -235,6 +240,8 @@ The return address that should be set to the event_handler should be at ebp+4 of
 "movl [handler], %%eax\n\t"
 "call *%eax\n\t"
 
+"call *%0\n\t"
+"call *%[handler]\n\t"
 
 **/
 
@@ -244,14 +251,14 @@ The return address that should be set to the event_handler should be at ebp+4 of
 do {									\
 	asm volatile("pushfl\n\t"		/* save    flags */	\
 		     "pushl %%ebp\n\t"		/* save    EBP   */	\
-		     "movl %%esp,%%ebp\n\t"	/* save    ESP   */	\
-                     "subl $56, %%esp\n\t"	/* pad the stack */	\
-                     "call %0\n\t"		/* handler call  */	\
+		     "movl %%esp, %%ebp\n\t"	/* save    ESP   */	\
+                     "movl %[handler], %%eax\n\t"			\
+                     "call *%eax\n\t"					\
                      "movl $0, %%eax\n\t"	/* move 0 to eax */	\
-                     "addl $56, %%esp\n\t"	/* move esp back */	\
                      "popl %%ebp\n\t"		/* restore ebp   */	\
                      "popfl\n"			/* restore flags */	\
-                     : "=i" (err) : "m" (handler_address));		\
+                     "ret\n\t"			/* return	 */	\
+                     : "=i" (err) : [handler] "r" (handler_address));		\
 } while (0)
 
 #else
@@ -259,15 +266,14 @@ do {									\
 #define handle_event(handler_address, err)				\
 	asm volatile("pushf\n\t"		/* save    flags */	\
 		     "pushq %%rbp\n\t"		/* save    RBP   */	\
-		     "movq %%rsp,%%rbp\n\t"	/* save    RSP   */	\
-                     "subq $56, %%rsp\n\t"	/* pad the stack */	\
-                     "call *%[handler]\n\t"	/* handler call  */	\
+		     "movq %%rsp, %%rbp\n\t"	/* save    RSP   */	\
+                     "call *%[handler]\n\t"				\
                      "movq $0, %%rax\n\t"	/* move 0 to rax */	\
-                     "addq $56, %%rsp\n\t"	/* move rsp back */	\
                      "popq %%rbp\n\t"		/* pop rbp       */	\
-                     : "=r" (err) : [handler] "m" (handler_address));
+                     "popf\n"			/* restore flags */	\
+                     "ret\n\t"			/* return	 */	\
+                     : "=r" (err) : [handler] "r" (handler_address));
 #endif
-
 
 int esm_dispatch(struct input_value* event, struct task_struct* task){
 	//If task->state == TASK_EV_WAIT
@@ -279,7 +285,7 @@ int esm_dispatch(struct input_value* event, struct task_struct* task){
 	application_l *application_category;
 	esm_event_t ev_keycode;
 	struct pt_regs *regs;
-	int* handler_address;
+	phys_addr_t handler_address;
 	struct event_queue_t* event_queue_item;
 	int dbg_pid = task->pid;
 	int err_out = 0;
@@ -314,11 +320,13 @@ int esm_dispatch(struct input_value* event, struct task_struct* task){
 
 				printk(KERN_WARNING "esm_dispatch attempting to wake up process: %d\n", dbg_pid);
 				if(wake_up_state(task, TASK_EV_WAIT) == 1){	//Less overhead to directly assign task->state = TASK_RUNNING
-
-					printk(KERN_WARNING "esm_dispatch has waken up process: %d\n", dbg_pid);
-					printk(KERN_WARNING "esm_dispatch: process: %d is in state: %ld\n", dbg_pid, task->state);
-
 					//Call handler (not like this but to the effect): application->event_handler(event->type, event->code, event->value);
+					//The wakeup will schedule where left off at wait, where the handler is called.
+
+					handler_address = application->event_handler;
+					printk(KERN_WARNING "esm_dispatch: HANDLER Physical ADDRESS: 0x%012x\n", handler_address);
+					printk(KERN_WARNING "esm_dispatch: has waken up process %d; task now in state %ld\n", dbg_pid, task->state);
+/**
 					//user stack pointer: task->thread->usersp
 					regs = task_pt_regs(task);
 					int* ebp = regs->bp;
@@ -328,13 +336,7 @@ int esm_dispatch(struct input_value* event, struct task_struct* task){
 						ebp = &ebp;
 						i--;
 					} while (i > 0);
-
-					handler_address = (int*)(application->event_handler);
-					printk(KERN_WARNING "HANDLER ADDRESS: 0x%08x\n", handler_address);
-//					handler_address = application->event_handler;
-//					handle_event(&handler_address, err_out);
-//					printk(KERN_WARNING "handle_event_out: %d\n", err_out);
-
+**/
 				}else{
 					pr_err("esm_dispatch can not wake up process %d, already running\n", dbg_pid);
 				}
@@ -368,7 +370,7 @@ int _handle_events(struct task_struct* task){
 	struct list_head *pos_one, *pos_two, *q;
 	struct event_queue_t* ev_queue;
 	struct input_value* event;
-	int* handler_address = NULL;
+	phys_addr_t handler_address;
 	int err, err_out = 0;
 
 	if(list_empty(&(task->event_queue))){
@@ -389,8 +391,8 @@ int _handle_events(struct task_struct* task){
 		list_for_each(pos_two, &(application_category->list)){
 			application = list_entry(pos_two, application_l, list);
 			if(application->task->pid == task->pid && ev_keycode == application->event_keycode){
-				handler_address = (int*)(application->event_handler);
-				printk(KERN_WARNING "HANDLER ADDRESS: 0x%08x\n", handler_address);
+				handler_address = application->event_handler;
+				printk(KERN_WARNING "_handle_events: HANDLER Physical ADDRESS: 0x%012x\n", handler_address);
 				handle_event(handler_address, err_out);			// TODO: Does not work (Valid Handler Address?)
 			}
 		}
@@ -418,8 +420,6 @@ int esm_wait(pid_t pid){
 
 	esm_event_t ev_keycode;
 	struct task_struct* task;
-//	int handler_address;
-	int* handler_address;
 	int err = 0;
 
 	printk(KERN_WARNING "esm_wait: %d\n", pid);

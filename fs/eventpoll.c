@@ -1588,13 +1588,47 @@ fetch_events:
 		init_waitqueue_entry(&wait, current);
 		__add_wait_queue_exclusive(&ep->wq, &wait);
 
-		//Added for ESM: Schedule instead of infinite loop?
+		//Added for ESM: Schedule instead of infinite loop:
+		/*
+		 * We don't want to sleep if the ep_poll_callback() sends us
+		 * a wakeup in between. That's why we set the task state
+		 * to TASK_INTERRUPTIBLE before doing the checks.
+		 */
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (ep_events_available(ep) || timed_out)
+			goto esm_out;
+		if (signal_pending(current)) {
+			res = -EINTR;
+			goto esm_out;
+		}
+
+		spin_unlock_irqrestore(&ep->lock, flags);
+
+//		error = wait_event_interruptible(evdev->wait,
+//                                client->packet_head != client->tail ||
+//                                !evdev->exist);
+//                if (error)
+//                        return error;
+
+		if (!freezable_schedule_hrtimeout_range(to, slack, HRTIMER_MODE_ABS)){
+			timed_out = 1;
+		}
+
+		spin_lock_irqsave(&ep->lock, flags);
+
+esm_out:
+		__remove_wait_queue(&ep->wq, &wait);
+
+		set_current_state(TASK_RUNNING);
+
+
+/**
 		for (;;) {
 			/*
 			 * We don't want to sleep if the ep_poll_callback() sends us
 			 * a wakeup in between. That's why we set the task state
 			 * to TASK_INTERRUPTIBLE before doing the checks.
-			 */
+			 *
 			set_current_state(TASK_INTERRUPTIBLE);
 			if (ep_events_available(ep) || timed_out)
 				break;
@@ -1613,6 +1647,10 @@ fetch_events:
 		__remove_wait_queue(&ep->wq, &wait);
 
 		set_current_state(TASK_RUNNING);
+**/
+
+
+
 	}
 check_events:
 	/* Is it worth to try to dig for events ? */

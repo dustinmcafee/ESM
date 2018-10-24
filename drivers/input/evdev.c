@@ -118,7 +118,7 @@ static void evdev_pass_values(struct evdev_client *client,
 }
 
 //Added for ESM
-extern void esm_interpret(struct input_value* event);
+//extern void esm_interpret(struct input_value* event);
 
 /*
  * Pass incoming events to all connected clients.
@@ -134,7 +134,7 @@ static void evdev_events(struct input_handle *handle,
 	time_real = ktime_sub(time_mono, ktime_get_monotonic_offset());
 
 	rcu_read_lock();
-
+/**
         //Added for ESM
         struct input_value* val;
         for (val = vals; val != vals + count; val++) {
@@ -145,7 +145,7 @@ static void evdev_events(struct input_handle *handle,
                         esm_interpret(val);
                 }
         }
-
+**/
 	client = rcu_dereference(evdev->grab);
 
 	if (client)
@@ -430,10 +430,66 @@ static ssize_t evdev_read(struct file *file, char __user *buffer,
 	struct input_event event;
 	size_t read = 0;
 	int error;
-
+	int retval;
+	//Added for ESM
+	struct input_dev *esm_input;
 	if (count != 0 && count < input_event_size())
 		return -EINVAL;
 
+
+
+
+
+	//Added for ESM
+	if (!evdev->exist)
+		return -ENODEV;
+
+	esm_input = evdev->handle.dev;
+
+	if (client->packet_head == client->tail &&
+	    (file->f_flags & O_NONBLOCK))
+		return -EAGAIN;
+
+	/*
+	 * count == 0 is special - no IO is done but we check
+	 * for error conditions (see above).
+	 */
+	if (count == 0)
+		return read;
+
+	//Hold Mutex lock, check for event
+//	retval = mutex_lock_interruptible(&esm_input->esm_mutex);
+	if (retval){
+		return retval;
+	}
+	while (read + input_event_size() <= count &&
+	       evdev_fetch_next_event(client, &event)) {
+
+		if (input_event_to_user(buffer + read, &event))
+//			mutex_unlock(&esm_input->esm_mutex);
+			return -EFAULT;
+
+		read += input_event_size();
+	}
+	if (read)
+//		mutex_unlock(&esm_input->esm_mutex);
+		return read;
+
+	//No input has been read, go to sleep
+	if (!(file->f_flags & O_NONBLOCK)) {
+		error = wait_event_interruptible(evdev->wait,
+				client->packet_head != client->tail ||
+				!evdev->exist);
+		if (error)
+//			mutex_unlock(&esm_input->esm_mutex);
+			return error;
+	}
+//	mutex_unlock(&esm_input->esm_mutex);
+	return read;
+
+
+
+/*
 	for (;;) {
 		if (!evdev->exist)
 			return -ENODEV;
@@ -446,6 +502,7 @@ static ssize_t evdev_read(struct file *file, char __user *buffer,
 		 * count == 0 is special - no IO is done but we check
 		 * for error conditions (see above).
 		 */
+/*
 		if (count == 0)
 			break;
 
@@ -471,6 +528,8 @@ static ssize_t evdev_read(struct file *file, char __user *buffer,
 	}
 
 	return read;
+*/
+
 }
 
 /* No kernel lock - fine */

@@ -38,8 +38,7 @@ typedef enum {MOUSE_RELATIVE_X,
 typedef struct {
 	spinlock_t lock;
 	struct list_head list;
-//	event_handler_t event_handler;
-	phys_addr_t event_handler;
+	uintptr_t event_handler;	//Virtual Address in User Space used as unique identifier to handler for the task
 	struct task_struct* task;
 	esm_event_t event_keycode;
 }application_l;
@@ -57,25 +56,26 @@ typedef struct {
 }application_list_t;
 
 typedef struct {
-	__u16 type;
-	__u16 code;
-	__u32 value;
-	struct task_struct* task;
+	//__u16 type;
+	//__u16 code;
+	//__u32 value;
+	struct input_value* event;
+	application_l* application;
 }esm_tasklet_data;
 
 application_l* handlers_for_event(esm_event_t keycode);
 
 //int esm_register(pid_t pid, __u16 type, __u16 code, event_handler_t event_handler);
-int esm_register(pid_t pid, __u16 type, __u16 code, int event_handler);
+int esm_register(pid_t pid, __u16 type, __u16 code, uintptr_t event_handler);
 
 //int esm_register1(pid_t pid, __u16 type, __u16 code, event_handler_t event_handler);
-int esm_register1(pid_t pid, __u16 type, __u16 code, int event_handler);
+int esm_register1(pid_t pid, __u16 type, __u16 code, uintptr_t event_handler);
 
-int esm_dispatch(struct input_value* event, struct task_struct* task);
+int esm_dispatch(struct input_value* event, application_l* application);
 
-int esm_wait(pid_t pid);
+int esm_wait(pid_t pid, void __user *event_buffer, void __user *handler_buffer);
 
-int esm_wait1(pid_t pid);
+int esm_wait1(pid_t pid, void __user *event_buffer, void __user *handler_buffer);
 
 int esm_interpret(struct input_value* event);
 

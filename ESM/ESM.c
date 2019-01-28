@@ -1,4 +1,4 @@
-/**
+ /**
  * Event Stream Model (ESM): Push model for input events.
  * Currently only works for certain mouse events.
  *
@@ -18,10 +18,9 @@
 #include <linux/linkage.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
-//#include <linux/uaccess.h> //copy_from_user
+#include <linux/uaccess.h> //copy_to_user
 #include <linux/interrupt.h> //for tasklets
 #include <ESM.h>
-//#include <linux/syscalls.h>
 
 //Module Stuff:
 //#include <linux/init.h>
@@ -91,10 +90,8 @@ application_list_t application_list = {
 };
 
 esm_tasklet_data tasklet_data = {
-	.code = 0,
-	.type = 0,
-	.value = 0,
-	.task = NULL
+	.event = NULL,
+	.application = &no_handlers
 };
 
 application_l* handlers_for_event(esm_event_t keycode){
@@ -131,7 +128,6 @@ application_l* handlers_for_event(esm_event_t keycode){
 	return application;
 }
 
-//esm_event_t esm_keycode_from_input(struct input_value* event){
 esm_event_t esm_keycode_from_input(__u16 type, __u16 code){
         esm_event_t event_keycode = APPLICATION_LIST_SIZE;
         if(type == EV_REL){
@@ -167,56 +163,43 @@ esm_event_t esm_keycode_from_input(__u16 type, __u16 code){
         return event_keycode;
 }
 
-//int esm_register(pid_t pid, __u16 type, __u16 code, __user event_handler_t event_handler_user) {
-int esm_register(pid_t pid, __u16 type, __u16 code, int event_handler) {
+int esm_register(pid_t pid, __u16 type, __u16 code, uintptr_t event_handler_user) {
 	//If event_handler == NULL
 	//	delete application_list[event][application]
 	//else
 	//	application_list[event][application] = event_handler
 	application_l *application_category, *application;
 	struct list_head *pos, *q;
-	struct task_struct* task;
 	esm_event_t event_keycode;
-	phys_addr_t physical_handler_address;
-
-//	event_handler_t event_handler = event_handler_user;
-	physical_handler_address = virt_to_phys(event_handler);
-	task = current;
+	uintptr_t event_handler = event_handler_user;
+	struct task_struct* task = current;
 
 	printk(KERN_WARNING "esm_register (pid: %d), (handler virtual address: 0x%08x)\n", task->pid, event_handler);
-	printk(KERN_WARNING "esm_register (pid: %d), (handler physical address: 0x%012x)\n", task->pid, physical_handler_address);
-	if(task == NULL){
-		pr_err("Can not esm_register, task is NULL\n");
-		return -EINVAL;
-	}
 
 	event_keycode = esm_keycode_from_input(type, code);
 	if(event_keycode == APPLICATION_LIST_SIZE){
 		pr_err("Invalid event to register\n");
 		return -EINVAL;
 	}
-
 	application_category = handlers_for_event(event_keycode);
-	spin_lock(&application_category->lock);
-//	if(event_handler == NULL){
-	if(event_handler == 0){
+
+	if(!event_handler){
+		//Delete all handlers for this event
+		spin_lock(&application_category->lock);
 		list_for_each_safe(pos, q, &(application_category->list)){
 			application = list_entry(pos, application_l, list);
-//			if(application->event_handler == event_handler){
-			if(application->event_handler == physical_handler_address){
-				list_del(pos);
-			}
+			list_del(pos);
 			kfree(application);
 		}
 		//free application_list[input_value][task->pid];
 	}else{
 		//application_list[input_value][task->pid] = event_handler;
-		application = kmalloc(sizeof(application_l*), GFP_KERNEL);
+		application = kmalloc(sizeof(application_l), GFP_KERNEL);
 
+		spin_lock(&application_category->lock);
 		application->event_keycode = event_keycode;
 		application->task = task;
-//		application->event_handler = event_handler;
-		application->event_handler = physical_handler_address;
+		application->event_handler = event_handler;
 
 		//Add application (event_handler) to corresponding application list (list of categorized event handlers)
 		list_add(&(application->list), &(application_category->list));
@@ -225,8 +208,7 @@ int esm_register(pid_t pid, __u16 type, __u16 code, int event_handler) {
 	return 0;
 }
 
-//int esm_register1(pid_t pid, __u16 type, __u16 code, __user event_handler_t event_handler) {
-int esm_register1(pid_t pid, __u16 type, __u16 code, int event_handler) {
+int esm_register1(pid_t pid, __u16 type, __u16 code, uintptr_t event_handler) {
 	return esm_register(pid, type, code, event_handler);
 }
 
@@ -275,141 +257,112 @@ do {									\
                      : "=r" (err) : [handler] "r" (handler_address));
 #endif
 
-int esm_dispatch(struct input_value* event, struct task_struct* task){
+int esm_dispatch(struct input_value* event, application_l* application){
 	//If task->state == TASK_EV_WAIT
 	//	task->state = TASK_RUNNUNG
 	//	handler = application_list[event][application]
 	//	handler(event)
 	//else
 	//	application.enqueue(event);
-	application_l *application_category;
-	esm_event_t ev_keycode;
-	struct pt_regs *regs;
-	phys_addr_t handler_address;
 	struct event_queue_t* event_queue_item;
-	int dbg_pid = task->pid;
-	int err_out = 0;
-//	struct thread_info* task_info = task_thread_info(task);
-//	int task_cpu = task_info->cpu;
+	int err = 0;
 
-	printk(KERN_WARNING "esm_dispatch pid: %d\n", dbg_pid);
+	printk(KERN_WARNING "esm_dispatch is adding the registered event to event queue, pid: %d\n", application->task->pid);
 
-	ev_keycode = esm_keycode_from_input(event->type, event->code);
-	application_category = handlers_for_event(ev_keycode);
-	spin_lock(&application_category->lock);				//TODO: Is this appropriate location?
+	//This lock applies for application handlers associated with a specific input value
+	event_queue_item = kmalloc(sizeof(struct event_queue_t), GFP_KERNEL);
+	spin_lock(&application->task->event_queue_lock);
+	event_queue_item->event = event;
+	list_add(&(event_queue_item->event_queue), &(application->task->event_queue.event_queue));
+	spin_unlock(&application->task->event_queue_lock);
 
-	if(task->state == TASK_EV_WAIT){
-		struct list_head* pos;
-		application_l *application;
+	printk(KERN_WARNING "Event Added!\n");
 
-		if(ev_keycode == APPLICATION_LIST_SIZE){
-			pr_err("Invalid event to dispatch\n");
-			return -EINVAL;
+	if(application->task->state == TASK_EV_WAIT){
+		printk(KERN_WARNING "esm_dispatch attempting to wake up process: %d\n", application->task->pid);
+		if(wake_up_state(application->task, TASK_EV_WAIT) == 1){	//Less overhead to directly assign task->state = TASK_RUNNING
+			printk(KERN_WARNING "esm_dispatch: has waken up process %d; task now in state %ld\n", application->task->pid, application->task->state);
+		}else{
+			printk(KERN_WARNING "esm_dispatch can not wake up process %d, already running\n", application->task->pid);
+			err = -1;
 		}
-
-		//For each handler of application
-		list_for_each(pos, &(application_category->list)){
-			application = list_entry(pos, application_l, list);
-			if(application->task->pid == dbg_pid){
-
-				printk(KERN_WARNING "esm_dispatch is adding the registered event to event queue, pid: %d\n", dbg_pid);
-				event_queue_item = kmalloc(sizeof(struct event_queue_t*), GFP_KERNEL);
-				event_queue_item->event = event;
-				list_add(&(event_queue_item->event_queue), &(task->event_queue));
-
-
-				printk(KERN_WARNING "esm_dispatch attempting to wake up process: %d\n", dbg_pid);
-				if(wake_up_state(task, TASK_EV_WAIT) == 1){	//Less overhead to directly assign task->state = TASK_RUNNING
-					//Call handler (not like this but to the effect): application->event_handler(event->type, event->code, event->value);
-					//The wakeup will schedule where left off at wait, where the handler is called.
-
-					handler_address = application->event_handler;
-					printk(KERN_WARNING "esm_dispatch: HANDLER Physical ADDRESS: 0x%012x\n", handler_address);
-					printk(KERN_WARNING "esm_dispatch: has waken up process %d; task now in state %ld\n", dbg_pid, task->state);
-/**
-					//user stack pointer: task->thread->usersp
-					regs = task_pt_regs(task);
-					int* ebp = regs->bp;
-					int i = 3;
-					do{
-						printk(KERN_WARNING "BASE POINTER %d: 0x%08x\n", i, ebp);
-						ebp = &ebp;
-						i--;
-					} while (i > 0);
-**/
-				}else{
-					pr_err("esm_dispatch can not wake up process %d, already running\n", dbg_pid);
-				}
-				break;
-			}else{
-				printk(KERN_WARNING "esm_dispatch could not dicipher the task struct from the list, pid: %d\n", application->task->pid);
-			}
-		}
-/*	} else {
-
-		printk(KERN_WARNING "esm_dispatch is adding the registered event to event queue, pid: %d\n", dbg_pid);
-
-		event_queue_item = kmalloc(sizeof(struct event_queue_t*), GFP_KERNEL);
-
-//		spin_lock(&event_queue_item->lock);	//causes deadlock, because there is a lock before dispatch call
-
-		event_queue_item->event = event;
-		list_add(&(event_queue_item->event_queue), &(task->event_queue));
-
-//		spin_unlock(&event_queue_item->lock);
-*/
 	}
 
-	spin_unlock(&application_category->lock);
-	return 0;
+	return err;
 }
 
-int _handle_events(struct task_struct* task){
+int _handle_events(void __user *event_buffer, void __user *handler_buffer){
 	application_l *application_category, *application;
 	esm_event_t ev_keycode;
-	struct list_head *pos_one, *pos_two, *q;
+	struct list_head *pos_one, *pos, *q, *qq;
 	struct event_queue_t* ev_queue;
 	struct input_value* event;
-	phys_addr_t handler_address;
-	int err, err_out = 0;
+	uintptr_t handler_address;
+	struct task_struct* task;
+	int err = 0;
+	bool copied = false;
+	task = current;
 
-	if(list_empty(&(task->event_queue))){
-		printk(KERN_WARNING "No events to handle, pid: %d\n", task->pid);
+	if(list_empty(&(task->event_queue.event_queue))){
+		printk(KERN_ERR "No events to handle, pid: %d\n", task->pid);
 		return -1;
 	}
 
-	//For each event
-	list_for_each_safe(pos_one, q, &(task->event_queue)){
-		printk(KERN_WARNING "Handling events, pid: %d\n", task->pid);
+	//For each event TODO: Does this grab the first element or should I use
+	//ev_queue = list_first_entry(&(task->event_queue.event_queue), struct event_queue_t, event_queue);
+	list_for_each_safe(pos_one, q, &(task->event_queue.event_queue)){
 		ev_queue = list_entry(pos_one, struct event_queue_t, event_queue);
+		printk(KERN_WARNING "Handling events, pid: %d\n", task->pid);
 		event = ev_queue->event;
 		ev_keycode = esm_keycode_from_input(event->type, event->code);
-		application_category = handlers_for_event(ev_keycode);
+		if(ev_keycode != APPLICATION_LIST_SIZE){
+			application_category = handlers_for_event(ev_keycode);
 
-		// For each handler of same event
-		spin_lock(&application_category->lock);
-		list_for_each(pos_two, &(application_category->list)){
-			application = list_entry(pos_two, application_l, list);
-			if(application->task->pid == task->pid && ev_keycode == application->event_keycode){
-				handler_address = application->event_handler;
-				printk(KERN_WARNING "_handle_events: HANDLER Physical ADDRESS: 0x%012x\n", handler_address);
-				handle_event(handler_address, err_out);			// TODO: Does not work (Valid Handler Address?)
+			// For each application handler of same event
+			list_for_each_safe(pos, qq, &(application_category->list)){
+				application = list_entry(pos, application_l, list);
+				if(application->task->pid == task->pid){
+					handler_address = application->event_handler;
+					printk(KERN_WARNING "_handle_events: HANDLER Virtual ADDRESS: 0x%012x\n", handler_address);
+
+					if(copy_to_user(event_buffer, event, sizeof(struct input_value)) || copy_to_user(handler_buffer, &handler_address, sizeof(uintptr_t))){
+						printk(KERN_ERR "_handle_events: Failed to Copy Event to User Supplied Buffer\n");
+						err = -EINVAL;
+					} else {
+						copied = true;
+					}
+
+					// Delete Application Handler
+					printk(KERN_WARNING "Removing event handler from pid: %d\n", task->pid);
+					spin_lock(&application_category->lock);
+					list_del(pos);
+					kfree(application);
+					spin_unlock(&application_category->lock);
+
+					// Delete the Handled Event
+					printk(KERN_WARNING "Removing handled event from pid: %d\n", task->pid);
+					spin_lock(&task->event_queue_lock);
+					list_del(pos_one);
+					kfree(event);
+					kfree(ev_queue);
+					spin_unlock(&task->event_queue_lock);
+//					handle_event(handler_address, err_out);		// TODO: Does not work; would like to accomplish something to this affect.
+					goto esm_out;		//Handle one at a time. Later should implement copying array of values to user space.
+					//TODO: FIXME: Should really copy multiple to userspace and delete what is not copied, otherwise the
+					//programmer would have to call esm_register/esm_wait in a loop to fish out all queued input values.
+				}
 			}
 		}
-		spin_unlock(&application_category->lock);
-
-		// Remove handled event from queue
-		printk(KERN_WARNING "Removing handled event from pid: %d\n", task->pid);
-		spin_lock(&ev_queue->lock);
-		list_del(pos_one);
-		kfree(ev_queue);
-		spin_unlock(&ev_queue->lock);
+	}
+esm_out:
+	if(err >= 0 && !copied){
+		err = -1;
 	}
 	return err;
 }
 
 
-int esm_wait(pid_t pid){
+int esm_wait(pid_t pid, void __user *event_buffer, void __user *handler_buffer){
 //	if(task->event_queue.empty()){
 //		task->state = TASK_EV_WAIT;
 //	} else {
@@ -417,77 +370,62 @@ int esm_wait(pid_t pid){
 //		task->state = TASK_EV_WAIT;
 //		esm_dispatch(event, task);
 //	}
-
-	esm_event_t ev_keycode;
-	struct task_struct* task;
-	int err = 0;
-
 	printk(KERN_WARNING "esm_wait: %d\n", pid);
-        task = current;
-        if(task == NULL){
-                pr_err("Can not esm_wait, task is NULL\n");
-		return -EINVAL;
-        }
 
-	set_task_state(task, TASK_EV_WAIT);
-	if(list_empty(&(task->event_queue))){
+	if(list_empty(&(current->event_queue.event_queue))){
 		printk(KERN_WARNING "esm_wait: event_queue is empty, scheduling task\n");
+		set_task_state(current, TASK_EV_WAIT);		//TODO: Make sure this is interruptible
 		schedule();
 	}
 
-	err = _handle_events(task);
-
-	return err;
+	return _handle_events(event_buffer, handler_buffer);
 }
 
-int esm_wait1(pid_t pid){
-	return esm_wait(pid);
+int esm_wait1(pid_t pid, void __user *event_buffer, void __user *handler_buffer){
+	return esm_wait(pid, event_buffer, handler_buffer);
 }
 
 void __esm_dispatch(esm_tasklet_data* tasklet_data){
-	struct task_struct* task;
-	struct input_value event;
-
-	task = tasklet_data->task;
-	event.type = tasklet_data->type;
-	event.code = tasklet_data->code;
-	event.value = tasklet_data->value;
-
-	esm_dispatch(&event, task);
+	esm_dispatch(tasklet_data->event, tasklet_data->application);
 }
 
 DECLARE_TASKLET(esm_dispatch_tasklet, __esm_dispatch, &tasklet_data);
 
-int esm_interpret(struct input_value* event){
+int esm_interpret(struct input_value* ev){
 	//foreach application in application_list
 	//	esm_dispatch(event, application)
-	struct list_head* pos;
-	struct task_struct* task;
+	struct list_head *pos, *q;
 	application_l *application, *application_category;
 	esm_event_t ev_keycode;
-	int err = 0;
+	struct input_value* event;
 
 	printk(KERN_WARNING "Call to ESM Interpret\n");
 
+	event = kmalloc(sizeof(struct input_value), GFP_ATOMIC);	//in interrupt context => use GFP_ATOMIC
+	memcpy(event, ev, sizeof(struct input_value));			//We need this to stay in memory until we copy_to_user
+
 	ev_keycode = esm_keycode_from_input(event->type, event->code);
 	if(ev_keycode == APPLICATION_LIST_SIZE){
-		pr_err("Invalid event being interpreted\n");
+		printk(KERN_ERR "Invalid event being interpreted\n");
 		return -EINVAL;
 	}
 
 	application_category = handlers_for_event(ev_keycode);
-	list_for_each(pos, &(application_category->list)){
-		application = list_entry(pos, application_l, list);
-		task = application->task;
 
-		tasklet_data.task = task;
-		tasklet_data.type = event->type;
-		tasklet_data.code = event->code;
-		tasklet_data.value = event->value;
-		tasklet_schedule(&esm_dispatch_tasklet);
-//		err = esm_dispatch(event, task);
+	//Check if nothing registered
+	if(list_empty(&(application_category->list))){
+		return 0;
 	}
-	return err;
+
+	//Dispatch for each registered application handler
+	list_for_each_safe(pos, q, &(application_category->list)){
+		application = list_entry(pos, application_l, list);
+		tasklet_data.application = application;
+		tasklet_data.event = event;
+		//Use Tasklet so that we may kmalloc GFP_KERNEL events and add to event queue for task
+		tasklet_schedule(&esm_dispatch_tasklet);
+	}
+	return 0;
 }
 
 /*

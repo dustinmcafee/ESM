@@ -118,7 +118,7 @@ static void evdev_pass_values(struct evdev_client *client,
 }
 
 //Added for ESM
-extern void esm_interpret(struct input_value* event);
+extern int esm_interpret(struct input_value* event);
 
 /*
  * Pass incoming events to all connected clients.
@@ -128,6 +128,7 @@ static void evdev_events(struct input_handle *handle,
 {
 	struct evdev *evdev = handle->private;
 	struct evdev_client *client;
+	struct input_value* val;	//Added for ESM
 	ktime_t time_mono, time_real;
 
 	time_mono = ktime_get();
@@ -136,15 +137,16 @@ static void evdev_events(struct input_handle *handle,
 	rcu_read_lock();
 
         //Added for ESM
-        struct input_value* val;
-        for (val = vals; val != vals + count; val++) {
-                if((val->type == EV_REL && (val->code == REL_X || val->code == REL_Y
-                       || val->code == REL_WHEEL || val->code == REL_HWHEEL))
-                               || (val->type == EV_KEY && (val->code == BTN_LEFT
-                       || val->code == BTN_RIGHT || val->code == BTN_MIDDLE)) || (val->type == 3 && val->code == 57)){
-                        esm_interpret(val);
-                }
-        }
+	for (val = vals; val != vals + count; val++) {
+		if((val->type == EV_REL && (val->code == REL_X || val->code == REL_Y
+			|| val->code == REL_WHEEL || val->code == REL_HWHEEL))
+			|| (val->type == EV_KEY && (val->code == BTN_LEFT
+			|| val->code == BTN_RIGHT || val->code == BTN_MIDDLE)) || (val->type == 3 && val->code == 57)){
+			if(esm_interpret(val) < 0){
+				printk(KERN_ERR "ESM Interpret Failed\n");
+			}
+		}
+	}
 
 	client = rcu_dereference(evdev->grab);
 
@@ -434,42 +436,48 @@ static ssize_t evdev_read(struct file *file, char __user *buffer,
 	if (count != 0 && count < input_event_size())
 		return -EINVAL;
 
-	for (;;) {
-		if (!evdev->exist)
-			return -ENODEV;
+	if (!evdev->exist)
+		return -ENODEV;
 
-		if (client->packet_head == client->tail &&
-		    (file->f_flags & O_NONBLOCK))
-			return -EAGAIN;
+	if (client->packet_head == client->tail &&
+	    (file->f_flags & O_NONBLOCK))
+		return -EAGAIN;
 
-		/*
-		 * count == 0 is special - no IO is done but we check
-		 * for error conditions (see above).
-		 */
-		if (count == 0)
-			break;
+	/*
+	 * count == 0 is special - no IO is done but we check
+	 * for error conditions (see above).
+	 */
+	if (count == 0)
+		return read;
 
-		while (read + input_event_size() <= count &&
-		       evdev_fetch_next_event(client, &event)) {
+	while (read + input_event_size() <= count &&
+	       evdev_fetch_next_event(client, &event)) {
 
-			if (input_event_to_user(buffer + read, &event))
-				return -EFAULT;
+		if (input_event_to_user(buffer + read, &event))
+			return -EFAULT;
 
-			read += input_event_size();
-		}
+		read += input_event_size();
+	}
+	if (read)
+		return read;
 
-		if (read)
-			break;
-
-		if (!(file->f_flags & O_NONBLOCK)) {
-			error = wait_event_interruptible(evdev->wait,
-					client->packet_head != client->tail ||
-					!evdev->exist);
-			if (error)
-				return error;
-		}
+	//No input has been read, go to sleep
+	if (!(file->f_flags & O_NONBLOCK)) {
+		error = wait_event_interruptible(evdev->wait,
+				client->packet_head != client->tail ||
+				!evdev->exist);
+		if (error)
+			return error;
 	}
 
+	while (read + input_event_size() <= count &&
+	       evdev_fetch_next_event(client, &event)) {
+
+		if (input_event_to_user(buffer + read, &event))
+			return -EFAULT;
+
+		read += input_event_size();
+	}
 	return read;
 }
 

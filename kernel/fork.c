@@ -1478,7 +1478,7 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 	 */
 	p->group_leader = p;
 	INIT_LIST_HEAD(&p->thread_group);
-        INIT_LIST_HEAD(&p->event_queue);                //Added for ESM
+        INIT_LIST_HEAD(&(p->event_queue.event_queue));                //Added for ESM
 	p->task_works = NULL;
 
 	/* Need tasklist lock for parent etc handling! */

@@ -168,14 +168,6 @@ struct epitem {
 	struct epoll_event event;
 };
 
-// Added for ESM
-/*
-struct gdb_file {
-	struct file *file;
-	struct list_head file_list;
-} __packed;
-*/
-
 /*
  * This structure is stored inside the "private_data" member of the file
  * structure and represents the main data structure for the eventpoll
@@ -223,10 +215,6 @@ struct eventpoll {
 	/* used to optimize loop detection check */
 	int visited;
 	struct list_head visited_list_link;
-
-	/* Added for ESM */
-	volatile int gdb;
-	//struct gdb_file gdb_f;
 };
 
 /* Wait structure used by the poll hooks */
@@ -932,8 +920,6 @@ static int ep_alloc(struct eventpoll **pep)
 	init_waitqueue_head(&ep->wq);
 	init_waitqueue_head(&ep->poll_wait);
 	INIT_LIST_HEAD(&ep->rdllist);
-	// Added for ESM
-	//INIT_LIST_HEAD(&ep->gdb_f.file_list);
 	ep->rbr = RB_ROOT;
 	ep->ovflist = EP_UNACTIVE_PTR;
 	ep->user = user;
@@ -987,73 +973,6 @@ static int ep_poll_callback(wait_queue_t *wait, unsigned mode, int sync, void *k
 	unsigned long flags;
 	struct epitem *epi = ep_item_from_wait(wait);
 	struct eventpoll *ep = epi->ep;
-	// Added for ESM
-	//char *tmp;
-	//volatile char *pathname;
-	//struct path *path;
-	volatile unsigned int cur_pid = current->pid;
-	volatile int *gdb = ep->gdb;
-	//volatile struct epoll_event gdb_event = epi->event;
-	volatile struct epoll_filefd gdbf = epi->ffd;
-	//volatile struct file *f = gdbf.file;
-	//volatile int fd = gdbf.fd;
-	/*
-	if (ep->gdb >= 1){
-		path = &f->f_path;
-		path_get(path);			//Should I use the spin_lock(&gdbf->file_lock) for path_get??
-		tmp = (char*)__get_free_page(GFP_KERNEL);
-		if (!tmp) {
-			path_put(path);
-			printk(KERN_WARNING "Could not Get file path for epoll event file");
-			// Should I break; ?
-		}
-		pathname = d_path(path, tmp, PAGE_SIZE);
-		path_put(path);
-		if(IS_ERR(pathname)) {
-			free_page((unsigned long)tmp);
-			printk(KERN_WARNING "File Pathname returned error for epoll event file");
-			// Now We have pathname for printing in gdb
-			printk(KERN_WARNING "Pathname:%s", pathname);
-			free_page((unsigned long)tmp);
-		}
-	}
-
-
-	struct list_head *pos;
-	struct gdb_file *gdbfile;
-	struct file *gdbf;
-	struct path *path;
-	char *tmp;
-	volatile char *pathname;
-
-	// Added for ESM
-	
-	if (ep->gdb >= 1){
-		list_for_each(pos, &(ep->gdb_f.file_list)){
-			gdbfile = list_entry(pos, struct gdb_file, file_list);
-			gdbf = gdbfile->file;
-			if (ep->gdb > 1){
-				path = &gdbf->f_path;
-				path_get(path);			//Should I use the spin_lock(&gdbf->file_lock) for path_get??
-				tmp = (char*)__get_free_page(GFP_KERNEL);
-				if (!tmp) {
-					path_put(path);
-					printk(KERN_WARNING "Could not Get file path for epoll event file");
-					// Should I break; ?
-				}
-				pathname = d_path(path, tmp, PAGE_SIZE);
-				path_put(path);
-				if(IS_ERR(pathname)) {
-					free_page((unsigned long)tmp);
-					printk(KERN_WARNING "File Pathname returned error for epoll event file");
-					// Now We have pathname for printing in gdb
-					printk(KERN_WARNING "Pathname:%s", pathname);
-					free_page((unsigned long)tmp);
-				}
-			}
-		}
-	}
-	*/
 
 	if ((unsigned long)key & POLLFREE) {
 		ep_pwq_from_wait(wait)->whead = NULL;
@@ -1119,9 +1038,6 @@ static int ep_poll_callback(wait_queue_t *wait, unsigned mode, int sync, void *k
 	 * wait list.
 	 */
 	if (waitqueue_active(&ep->wq))
-		if (ep->gdb >= 1){
-			printk(KERN_WARNING "Event Callback FD:%d", gdbf.fd);
-		}
 		wake_up_locked(&ep->wq);
 	if (waitqueue_active(&ep->poll_wait))
 		pwake++;
@@ -1131,9 +1047,6 @@ out_unlock:
 
 	/* We have to call this outside the lock */
 	if (pwake)
-		if (ep->gdb >= 1){
-			printk(KERN_WARNING "Event Callback FD:%d", gdbf.fd);
-		}
 		ep_poll_safewake(&ep->poll_wait);
 
 	return 1;
@@ -1646,27 +1559,6 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
 	long slack = 0;
 	wait_queue_t wait;
 	ktime_t expires, *to = NULL;
-	//Added for ESM
-	volatile unsigned int cur_pid = current->pid;
-	volatile int *gdb = ep->gdb;
-	char *tmp;
-	volatile char *pathname;
-	struct path *path;
-	struct list_head *pos;
-	volatile struct epoll_filefd gdbf;
-	volatile struct file *f;
-	volatile int fd;
-	struct epitem *epi;
-	int it = 0;
-
-	/*
-	struct list_head *pos;
-	struct gdb_file *gdbfile;
-	struct file *gdbf;
-	struct path *path;
-	char *tmp;
-	volatile char *pathname;
-	*/
 
 	if (timeout > 0) {
 		struct timespec end_time = ep_set_mstimeout(timeout);
@@ -1684,35 +1576,6 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
 		goto check_events;
 	}
 
-	// Added for ESM
-	/*
-	if (ep->gdb >= 1){
-		list_for_each(pos, &(ep->gdb_f.file_list)){
-			gdbfile = list_entry(pos, struct gdb_file, file_list);
-			gdbf = gdbfile->file;
-			if (ep->gdb > 1){
-				path = &gdbf->f_path;
-				path_get(path);			//Should I use the spin_lock(&gdbf->file_lock) for path_get??
-				tmp = (char*)__get_free_page(GFP_KERNEL);
-				if (!tmp) {
-					path_put(path);
-					printk(KERN_WARNING "Could not Get file path for epoll event file");
-					// Should I break; ?
-				}
-				pathname = d_path(path, tmp, PAGE_SIZE);
-				path_put(path);
-				if(IS_ERR(pathname)) {
-					free_page((unsigned long)tmp);
-					printk(KERN_WARNING "File Pathname returned error for epoll event file");
-					// Now We have pathname for printing in gdb
-					printk(KERN_WARNING "Pathname:%s", pathname);
-					free_page((unsigned long)tmp);
-				}
-			}
-		}
-	}
-	*/
-
 fetch_events:
 	spin_lock_irqsave(&ep->lock, flags);
 
@@ -1725,30 +1588,35 @@ fetch_events:
 		init_waitqueue_entry(&wait, current);
 		__add_wait_queue_exclusive(&ep->wq, &wait);
 
-		for (;;) {
-			/*
-			 * We don't want to sleep if the ep_poll_callback() sends us
-			 * a wakeup in between. That's why we set the task state
-			 * to TASK_INTERRUPTIBLE before doing the checks.
-			 */
-			set_current_state(TASK_INTERRUPTIBLE);
-			if (ep_events_available(ep) || timed_out)
-				break;
-			if (signal_pending(current)) {
-				res = -EINTR;
-				break;
-			}
-
-			spin_unlock_irqrestore(&ep->lock, flags);
-			//Added for ESM
-			//printk(KERN_WARNING "Epoll_Wait on pid: %d", cur_pid);
-
-			if (!freezable_schedule_hrtimeout_range(to, slack,
-								HRTIMER_MODE_ABS))
-				timed_out = 1;
-
-			spin_lock_irqsave(&ep->lock, flags);
+		//Added for ESM: Removal of infinite loop:
+		/*
+		 * We don't want to sleep if the ep_poll_callback() sends us
+		 * a wakeup in between. That's why we set the task state
+		 * to TASK_INTERRUPTIBLE before doing the checks.
+		 */
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (ep_events_available(ep) || timed_out)
+			goto esm_out;
+		if (signal_pending(current)) {
+			res = -EINTR;
+			goto esm_out;
 		}
+
+		spin_unlock_irqrestore(&ep->lock, flags);
+
+//		error = wait_event_interruptible(evdev->wait,
+//                                client->packet_head != client->tail ||
+//                                !evdev->exist);
+//                if (error)
+//                        return error;
+
+		if (!freezable_schedule_hrtimeout_range(to, slack, HRTIMER_MODE_ABS)){
+			timed_out = 1;
+		}
+
+		spin_lock_irqsave(&ep->lock, flags);
+
+esm_out:
 		__remove_wait_queue(&ep->wq, &wait);
 
 		set_current_state(TASK_RUNNING);
@@ -1759,37 +1627,6 @@ check_events:
 
 	spin_unlock_irqrestore(&ep->lock, flags);
 
-	// Added for ESM
-	/*
-	if(eavail){
-		if (ep->gdb >= 1){
-			list_for_each(pos, &(ep->rdllist)){
-				epi = list_entry(pos, struct epitem, rdllink);
-				gdbf = epi->ffd;
-				f = gdbf.file;
-				fd = gdbf.fd;
-				path = &f->f_path;
-				path_get(path);			//Should I use the spin_lock(&gdbf->file_lock) for path_get??
-				tmp = (char*)__get_free_page(GFP_KERNEL);
-				if (!tmp) {
-					path_put(path);
-					printk(KERN_WARNING "Could not Get file path for epoll event file");
-					// Should I break; ?
-				}
-				pathname = d_path(path, tmp, PAGE_SIZE);
-				path_put(path);
-				if(IS_ERR(pathname)) {
-					free_page((unsigned long)tmp);
-					printk(KERN_WARNING "File Pathname returned error for epoll event file");
-					// Now We have pathname for printing in gdb
-					printk(KERN_WARNING "Pathname:%s", pathname);
-					free_page((unsigned long)tmp);
-				}
-			}
-		}
-	}
-	*/
-
 	/*
 	 * Try to transfer events to user space. In case we get 0 events and
 	 * there's still timeout left over, we go trying again in search of
@@ -1798,17 +1635,6 @@ check_events:
 	if (!res && eavail &&
 	    !(res = ep_send_events(ep, events, maxevents)) && !timed_out)
 		goto fetch_events;
-
-	// Added for ESM
-	if (ep->gdb > 1){
-		it = 0;
-		list_for_each(pos, &(ep->rdllist)){
-			epi = list_entry(pos, struct epitem, rdllink);
-			gdbf = epi->ffd;
-			it = it + 1;
-			printk(KERN_WARNING "Event %d Return FD:%d", it, gdbf.fd);
-		}
-	}
 
 	return res;
 }
@@ -2044,8 +1870,6 @@ SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
 			}
 		} else
 			list_add(&tfile->f_tfile_llink, &tfile_check_list);
-			// Added for ESM
-			//list_add(&tfile->f_tfile_llink, &ep->gdb_f.file_list);
 	}
 
 	mutex_lock_nested(&ep->mtx, 0);

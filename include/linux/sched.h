@@ -1036,7 +1036,6 @@ enum perf_event_task_context {
 
 //Added for ESM
 struct event_queue_t {
-	spinlock_t lock;
         struct list_head event_queue;
         struct input_value* event;
 };
@@ -1237,7 +1236,8 @@ struct task_struct {
 	sigset_t *notifier_mask;
 	struct callback_head *task_works;
 
-        struct list_head event_queue;                   //Added for ESM
+        struct event_queue_t event_queue;                   //Added for ESM
+	spinlock_t event_queue_lock;
 
 	struct audit_context *audit_context;
 #ifdef CONFIG_AUDITSYSCALL

@@ -128,7 +128,10 @@ static void evdev_events(struct input_handle *handle,
 {
 	struct evdev *evdev = handle->private;
 	struct evdev_client *client;
-	struct input_value* val;	//Added for ESM
+	struct input_value* val;		//Added for ESM
+	int err = 0;				//Added for ESM
+	struct input_dev *dev = handle->dev;	//Added for ESM
+	struct input_id id = dev->id;		//Added for ESM
 	ktime_t time_mono, time_real;
 
 	time_mono = ktime_get();
@@ -138,14 +141,15 @@ static void evdev_events(struct input_handle *handle,
 
         //Added for ESM
 	for (val = vals; val != vals + count; val++) {
-		if((val->type == EV_REL && (val->code == REL_X || val->code == REL_Y
-			|| val->code == REL_WHEEL || val->code == REL_HWHEEL))
-			|| (val->type == EV_KEY && (val->code == BTN_LEFT
-			|| val->code == BTN_RIGHT || val->code == BTN_MIDDLE)) || (val->type == 3 && val->code == 57)){
-			if(esm_interpret(val) < 0){
+//		if((val->type == EV_REL && (val->code == REL_X || val->code == REL_Y
+//			|| val->code == REL_WHEEL || val->code == REL_HWHEEL))
+//			|| (val->type == EV_KEY && (val->code == BTN_LEFT
+//			|| val->code == BTN_RIGHT || val->code == BTN_MIDDLE)) || (val->type == 3 && val->code == 57)){
+			err = esm_interpret(val);
+			if(err < 0){
 				printk(KERN_ERR "ESM Interpret Failed\n");
 			}
-		}
+//		}
 	}
 
 	client = rcu_dereference(evdev->grab);

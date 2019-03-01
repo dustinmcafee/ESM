@@ -1238,6 +1238,7 @@ struct task_struct {
 
         struct event_queue_t event_queue;                   //Added for ESM
 	spinlock_t event_queue_lock;
+	unsigned int registered_handlers;
 
 	struct audit_context *audit_context;
 #ifdef CONFIG_AUDITSYSCALL

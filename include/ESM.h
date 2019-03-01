@@ -20,9 +20,6 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 
-//#include <linux/syscalls.h>
-
-//typedef void (*event_handler_t)(struct input_value*);
 typedef void (*event_handler_t)(__u16, __u16, __s32);
 
 typedef enum {MOUSE_RELATIVE_X,
@@ -33,6 +30,7 @@ typedef enum {MOUSE_RELATIVE_X,
 		MOUSE_BUTTON_RIGHT,
 		MOUSE_BUTTON_MIDDLE,
 		EMU_MOUSE_BUTTON_LEFT,
+		UNKNOWN_KEY,
 		APPLICATION_LIST_SIZE} esm_event_t;
 
 typedef struct {
@@ -52,24 +50,20 @@ typedef struct {
 	application_l* mouse_btn_right_handlers;
 	application_l* mouse_btn_middle_handlers;
 	application_l* emu_mouse_btn_left_handlers;
+	application_l* unknown_key_handlers;
 	application_l* no_handlers;
 }application_list_t;
 
 typedef struct {
-	//__u16 type;
-	//__u16 code;
-	//__u32 value;
 	struct input_value* event;
 	application_l* application;
 }esm_tasklet_data;
 
 application_l* handlers_for_event(esm_event_t keycode);
 
-//int esm_register(pid_t pid, __u16 type, __u16 code, event_handler_t event_handler);
-int esm_register(pid_t pid, __u16 type, __u16 code, uintptr_t event_handler);
+int esm_register(uint8_t* __user evtype_bitmask, pid_t pid, __u16 type, __u16 code, uintptr_t event_handler);
 
-//int esm_register1(pid_t pid, __u16 type, __u16 code, event_handler_t event_handler);
-int esm_register1(pid_t pid, __u16 type, __u16 code, uintptr_t event_handler);
+int esm_register1(uint8_t* __user evtype_bitmask, pid_t pid, __u16 type, __u16 code, uintptr_t event_handler);
 
 int esm_dispatch(struct input_value* event, application_l* application);
 

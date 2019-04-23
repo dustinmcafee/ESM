@@ -712,9 +712,11 @@ __SYSCALL(__NR_esm_wait, sys_esm_wait)
 __SYSCALL(__NR_esm_register1, sys_esm_register1)
 #define __NR_esm_wait1 294
 __SYSCALL(__NR_esm_wait1, sys_esm_wait1)
+#define __NR_esm_wait1 295
+__SYSCALL(__NR_esm_ctl, sys_esm_ctl)
 
 #undef __NR_syscalls
-#define __NR_syscalls 295
+#define __NR_syscalls 296
 
 /*
  * All syscalls below here should go away really,

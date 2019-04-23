@@ -861,10 +861,12 @@ asmlinkage long sys_seccomp(unsigned int op, unsigned int flags,
 			    const char __user *uargs);
 //Added for ESM
 #include <ESM.h>
-asmlinkage long sys_esm_register(uint8_t* __user evtype_bitmask, pid_t pid, __u16 type, __u16 code, uintptr_t event_handler);
-asmlinkage long sys_esm_wait(pid_t pid, void __user *event_buffer, void __user *handler_buffer);
+asmlinkage long sys_esm_register(void __user* id, pid_t pid, int reg);
+asmlinkage long sys_esm_wait(void __user *event_buffer, int max_events);
 
-asmlinkage long sys_esm_register1(uint8_t* __user evtype_bitmask, pid_t pid, __u16 type, __u16 code, uintptr_t event_handler);
-asmlinkage long sys_esm_wait1(pid_t pid, void __user *event_buffer, void __user *handler_buffer);
+asmlinkage long sys_esm_register1(void __user* id, pid_t pid, int reg);
+asmlinkage long sys_esm_wait1(void __user *event_buffer, int max_events);
+
+asmlinkage long sys_esm_ctl(int mode, int arg1, int arg2);
 
 #endif

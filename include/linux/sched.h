@@ -308,7 +308,6 @@ extern signed long schedule_timeout(signed long timeout);
 extern signed long schedule_timeout_interruptible(signed long timeout);
 extern signed long schedule_timeout_killable(signed long timeout);
 extern signed long schedule_timeout_uninterruptible(signed long timeout);
-asmlinkage int esm_context_switch(struct task_struct* next);			//Added for ESM
 asmlinkage void schedule(void);
 extern void schedule_preempt_disabled(void);
 
@@ -1238,7 +1237,6 @@ struct task_struct {
 
         struct event_queue_t event_queue;                   //Added for ESM
 	spinlock_t event_queue_lock;
-	unsigned int registered_handlers;
 
 	struct audit_context *audit_context;
 #ifdef CONFIG_AUDITSYSCALL

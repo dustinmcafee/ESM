@@ -118,7 +118,7 @@ static void evdev_pass_values(struct evdev_client *client,
 }
 
 //Added for ESM
-extern int esm_interpret(struct input_value* event);
+extern int esm_interpret(struct input_value* event, struct input_id id);
 
 /*
  * Pass incoming events to all connected clients.
@@ -145,7 +145,7 @@ static void evdev_events(struct input_handle *handle,
 //			|| val->code == REL_WHEEL || val->code == REL_HWHEEL))
 //			|| (val->type == EV_KEY && (val->code == BTN_LEFT
 //			|| val->code == BTN_RIGHT || val->code == BTN_MIDDLE)) || (val->type == 3 && val->code == 57)){
-			err = esm_interpret(val);
+			err = esm_interpret(val, id);
 			if(err < 0){
 				printk(KERN_ERR "ESM Interpret Failed\n");
 			}

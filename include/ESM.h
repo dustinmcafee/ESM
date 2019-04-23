@@ -19,58 +19,72 @@
 #include <linux/linkage.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
-
-typedef void (*event_handler_t)(__u16, __u16, __s32);
-
-typedef enum {MOUSE_RELATIVE_X,
-		MOUSE_RELATIVE_Y,
-		MOUSE_RELATIVE_WHEEL,
-		MOUSE_RELATIVE_HWHEEL,
-		MOUSE_BUTTON_LEFT,
-		MOUSE_BUTTON_RIGHT,
-		MOUSE_BUTTON_MIDDLE,
-		EMU_MOUSE_BUTTON_LEFT,
-		UNKNOWN_KEY,
-		APPLICATION_LIST_SIZE} esm_event_t;
+#include <linux/workqueue.h>
 
 typedef struct {
 	spinlock_t lock;
 	struct list_head list;
-	uintptr_t event_handler;	//Virtual Address in User Space used as unique identifier to handler for the task
 	struct task_struct* task;
-	esm_event_t event_keycode;
+	struct workqueue_struct *wq;
+	struct input_id id;
 }application_l;
 
 typedef struct {
-	application_l* mouse_rel_x_handlers;
-	application_l* mouse_rel_y_handlers;
-	application_l* mouse_rel_wheel_handlers;
-	application_l* mouse_rel_hwheel_handlers;
-	application_l* mouse_btn_left_handlers;
-	application_l* mouse_btn_right_handlers;
-	application_l* mouse_btn_middle_handlers;
-	application_l* emu_mouse_btn_left_handlers;
-	application_l* unknown_key_handlers;
-	application_l* no_handlers;
-}application_list_t;
+	struct input_value event;
+	application_l* application;
+}esm_dispatch_args;
 
 typedef struct {
-	struct input_value* event;
-	application_l* application;
-}esm_tasklet_data;
+	struct work_struct work;
+	esm_dispatch_args data;
+}esm_work_data;
 
-application_l* handlers_for_event(esm_event_t keycode);
+application_l* application_from_input_id(struct input_id id, struct task_struct* task);
 
-int esm_register(uint8_t* __user evtype_bitmask, pid_t pid, __u16 type, __u16 code, uintptr_t event_handler);
+/**
+ * Register ESM to process (pid)
+ * id: input device to register/deregister
+ * pid: process to register/deregister to/from
+ * reg: 1 to register, 0 to deregister
+ *
+ * Return: 0 on success, -1 on failure
+ */
+int esm_register(void __user* id, pid_t pid, int reg);
+int esm_register1(void __user* id, pid_t pid, int reg);
 
-int esm_register1(uint8_t* __user evtype_bitmask, pid_t pid, __u16 type, __u16 code, uintptr_t event_handler);
+/**
+ * Dispatch event to application. Wakes up application in esm_wait, or queues event
+ *
+ * event: input event to dispatch
+ * application: task to dispatch to
+ *
+ * Return 0 on Success, -1 on Failure
+ */
+//int esm_dispatch(struct input_value event, application_l* application);
+void esm_dispatch(struct work_struct *work);
 
-int esm_dispatch(struct input_value* event, application_l* application);
+/**
+ * Wait for registered events. Events are copied to user buffer. If there are events
+ * already queued, then it does not sleep, otherwise it sleeps in state TASK_EV_WAIT
+ *
+ * event_buffer: user event buffer to recieve events (max: MAX_EVENTS)
+ * max_events: maximum number of events to copy to buffer
+ *
+ * Return: number of events copied to user buffer
+ */
+int esm_wait(void __user *event_buffer, int max_events);
+int esm_wait1(void __user *event_buffer, int max_events);
 
-int esm_wait(pid_t pid, void __user *event_buffer, void __user *handler_buffer);
+/**
+ * Recieves input information from Evdev and sends to dispatch
+ *
+ * ev: input value recieved
+ * id: input device id that recieved the event
+ *
+ * Return: 0 on success, -1 on failure
+ */
+int esm_interpret(struct input_value* event, struct input_id);
 
-int esm_wait1(pid_t pid, void __user *event_buffer, void __user *handler_buffer);
-
-int esm_interpret(struct input_value* event);
+int esm_ctl(int mode, int arg1, int arg2);
 
 #endif	//_ESM_H

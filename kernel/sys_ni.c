@@ -218,4 +218,6 @@ cond_syscall(sys_esm_register);
 cond_syscall(sys_esm_wait);
 cond_syscall(sys_esm_register1);
 cond_syscall(sys_esm_wait1);
+cond_syscall(sys_esm_ctl);
+cond_syscall(sys_esm_ctl1);
 

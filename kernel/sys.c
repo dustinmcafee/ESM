@@ -2625,7 +2625,10 @@ SYSCALL_DEFINE2(esm_wait, void __user*, event_buffer, int, max_events){
 }
 
 SYSCALL_DEFINE3(esm_ctl, int, mode, int, arg1, int, arg2){
-      return sys_esm_ctl(mode, arg1, arg2);
+      return sys_esm_ctl1(mode, arg1, arg2);
+}
+SYSCALL_DEFINE3(esm_ctl1, int, mode, int, arg1, int, arg2){
+      return esm_ctl(mode, arg1, arg2);
 }
 
 

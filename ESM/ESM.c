@@ -308,11 +308,12 @@ int esm_ctl(int mode, int arg1, int arg2) {
 	struct task_struct* task_new;
 	application_l* app;
 	struct list_head *pos;
-	printk(KERN_WARNING "Call to ESM_CTL\n");
+	printk(KERN_WARNING "Call to ESM_CTL: from pid: %d to pid: %d\n", arg1, current->pid);
 	if (mode == 0) {
 		if(!list_empty(&root_devices.list)){
 			task = find_task_by_vpid(arg1);
-			task_new = find_task_by_vpid(arg2);
+			//task_new = find_task_by_vpid(arg2);
+			task_new = find_task_by_vpid(current->pid);
 			list_for_each(pos, &(root_devices.list)){
 				app = list_entry(pos, application_l, list);
 				if (app->task == task) {
@@ -322,4 +323,7 @@ int esm_ctl(int mode, int arg1, int arg2) {
 		}
 	}
 	return 0;
+}
+int esm_ctl1(int mode, int arg1, int arg2) {
+	return esm_ctl(mode, arg1, arg2);
 }

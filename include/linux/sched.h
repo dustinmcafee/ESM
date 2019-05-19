@@ -55,6 +55,9 @@ struct sched_param {
 
 #include <asm/processor.h>
 
+// Added for ESM
+#include <uapi/linux/eventpoll.h>
+
 struct exec_domain;
 struct futex_pi_state;
 struct robust_list_head;
@@ -1037,6 +1040,7 @@ enum perf_event_task_context {
 struct event_queue_t {
         struct list_head event_queue;
         struct input_value* event;
+	struct epoll_event ep_event;
 };
 
 struct task_struct {

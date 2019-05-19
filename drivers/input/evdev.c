@@ -141,15 +141,10 @@ static void evdev_events(struct input_handle *handle,
 
         //Added for ESM
 	for (val = vals; val != vals + count; val++) {
-//		if((val->type == EV_REL && (val->code == REL_X || val->code == REL_Y
-//			|| val->code == REL_WHEEL || val->code == REL_HWHEEL))
-//			|| (val->type == EV_KEY && (val->code == BTN_LEFT
-//			|| val->code == BTN_RIGHT || val->code == BTN_MIDDLE)) || (val->type == 3 && val->code == 57)){
-			err = esm_interpret(val, id);
-			if(err < 0){
-				printk(KERN_ERR "ESM Interpret Failed\n");
-			}
-//		}
+		err = esm_interpret(val, id);
+		if(err < 0){
+			printk(KERN_ERR "ESM Interpret Failed: %d\n", err);
+		}
 	}
 
 	client = rcu_dereference(evdev->grab);

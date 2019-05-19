@@ -2611,17 +2611,17 @@ SYSCALL_DEFINE1(sysinfo, struct sysinfo __user *, info)
 
 //Added for ESM
 #include <ESM.h>
-SYSCALL_DEFINE3(esm_register1, void __user*, id, pid_t, pid, int, reg){
-      return esm_register(id, pid, reg);
+SYSCALL_DEFINE4(esm_register1, void __user*, id, pid_t, pid, void __user*, epoll_buffer, int, reg){
+      return esm_register(id, pid, epoll_buffer, reg);
 }
-SYSCALL_DEFINE2(esm_wait1, void __user*, event_buffer, int, max_events){
-      return esm_wait(event_buffer, max_events);
+SYSCALL_DEFINE4(esm_wait1, void __user*, event_buffer, int, max_events, void __user*, epoll_buffer, pid_t, pid){
+      return esm_wait(event_buffer, max_events, epoll_buffer, pid);
 }
-SYSCALL_DEFINE3(esm_register, void __user*, id, pid_t, pid, int, reg){
-      return sys_esm_register1(id, pid, reg);
+SYSCALL_DEFINE4(esm_register, void __user*, id, pid_t, pid, void __user*, epoll_buffer, int, reg){
+      return sys_esm_register1(id, pid, epoll_buffer, reg);
 }
-SYSCALL_DEFINE2(esm_wait, void __user*, event_buffer, int, max_events){
-      return sys_esm_wait1(event_buffer, max_events);
+SYSCALL_DEFINE4(esm_wait, void __user*, event_buffer, int, max_events, void __user*, epoll_buffer, pid_t, pid){
+      return sys_esm_wait1(event_buffer, max_events, epoll_buffer, pid);
 }
 
 SYSCALL_DEFINE3(esm_ctl, int, mode, int, arg1, int, arg2){

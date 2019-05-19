@@ -20,6 +20,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/workqueue.h>
+#include <linux/eventpoll.h>
 
 typedef struct {
 	spinlock_t lock;
@@ -27,6 +28,7 @@ typedef struct {
 	struct task_struct* task;
 	struct workqueue_struct *wq;
 	struct input_id id;
+	struct epoll_event ep_event;
 }application_l;
 
 typedef struct {
@@ -49,8 +51,8 @@ application_l* application_from_input_id(struct input_id id, struct task_struct*
  *
  * Return: 0 on success, -1 on failure
  */
-int esm_register(void __user* id, pid_t pid, int reg);
-int esm_register1(void __user* id, pid_t pid, int reg);
+int esm_register(void __user* id, pid_t pid, void __user* ep_item, int reg);
+int esm_register1(void __user* id, pid_t pid, void __user* ep_item, int reg);
 
 /**
  * Dispatch event to application. Wakes up application in esm_wait, or queues event
@@ -72,8 +74,8 @@ void esm_dispatch(struct work_struct *work);
  *
  * Return: number of events copied to user buffer
  */
-int esm_wait(void __user *event_buffer, int max_events);
-int esm_wait1(void __user *event_buffer, int max_events);
+int esm_wait(void __user *event_buffer, int max_events, void __user* ep_buffer, pid_t pid);
+int esm_wait1(void __user *event_buffer, int max_events, void __user* ep_buffer, pid_t pid);
 
 /**
  * Recieves input information from Evdev and sends to dispatch

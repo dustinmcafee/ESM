@@ -85,7 +85,7 @@ void print_debug_task_event_queue(struct task_struct *task) {
 		event = ev_queue->event;
 
 		// Print Event
-		printk(KERN_WARNING "Task pid: %d, Event Type: %d, Event Code: %d, Event Value: %d\n", task->pid, event->type, event->code, event->value);
+		printk(KERN_DEBUG "Task pid: %d, Event Type: %d, Event Code: %d, Event Value: %d\n", task->pid, event->type, event->code, event->value);
 	}
 }
 
@@ -340,7 +340,8 @@ int esm_ctl(int mode, int pid1, int pid2) {
 	struct task_struct* task_new;
 	application_l* app;
 	struct list_head *pos;
-	printk(KERN_WARNING "Call to ESM_CTL: from pid: %d to pid: %d\n", pid1, current->pid);
+
+	printk(KERN_DEBUG "Call to ESM_CTL: from pid: %d to pid: %d\n", pid1, current->pid);
 	if (mode == 0) {
 		if(!list_empty(&root_devices.list)){
 			task = find_task_by_vpid(pid1);

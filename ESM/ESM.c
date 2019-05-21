@@ -10,6 +10,8 @@
  **/
 
 
+// TODO: Change all instances of input_value to input_event, include timestamp in evdev.c when invoking esm_interpret
+
 #include <linux/input.h>	//struct input_value
 #include <linux/sched.h>
 #include <linux/pid.h>
@@ -110,7 +112,7 @@ int esm_register(void __user* inid, pid_t pid, void __user* epoll_item, int reg)
 	}
 
 	if(!reg && !list_empty(&(root_devices.list))){
-		//Delete all handlers for this event
+		// Delete (Unregister) all handlers for this input device
 		printk(KERN_DEBUG "esm_register de-registering input device from (pid: %d)\n", task->pid);
                 application = application_from_input_id(id, task);
 		if(!input_id_equal(application->id, root_devices.id)){
@@ -127,6 +129,7 @@ int esm_register(void __user* inid, pid_t pid, void __user* epoll_item, int reg)
 			return -1;
 		}
 	} else if (reg) {
+		// Register input device to ESM
 		printk(KERN_DEBUG "esm_register registering input device to (pid: %d)\n", task->pid);
 		application = kmalloc(sizeof(application_l), GFP_KERNEL);
 		if(!application){
@@ -186,12 +189,15 @@ void esm_dispatch(struct work_struct* work){
 		kfree(work_data);
 		return;
 	}
+
+	// Add event queue item to task's event queue
 	spin_lock(&application->task->event_queue_lock);
 	event_queue_item->event = event;
 	event_queue_item->ep_event = application->ep_event;
 	list_add(&(event_queue_item->event_queue), &(application->task->event_queue.event_queue));
 	spin_unlock(&application->task->event_queue_lock);
 
+	// Attempt to wake up the process from esm_wait
 	if(application->task->state == TASK_EV_WAIT){
 		printk(KERN_DEBUG "esm_dispatch attempting to wake up process: %d\n", application->task->pid);
 		if(wake_up_state(application->task, TASK_EV_WAIT) == 1){	//Less overhead to directly assign task->state = TASK_RUNNING
@@ -329,7 +335,7 @@ int esm_interpret(struct input_value* event, struct input_id id){
 /**
  * Changes state of the ESM system
  *
- * mode: if 0, moves all registered handlers from one task to another
+ * mode: if 0, moves all registered handlers and queued events from one task to another
  * pid1: process to move handlers from
  * pid2: process to move handlers to
  *
@@ -339,8 +345,8 @@ int esm_ctl(int mode, int pid1, int pid2) {
 	struct task_struct* task;
 	struct task_struct* task_new;
 	application_l* app;
-	struct list_head *pos;
-
+	struct list_head *pos, *pos_one, *q;
+	struct event_queue_t* ev_queue;
 	printk(KERN_DEBUG "Call to ESM_CTL: from pid: %d to pid: %d\n", pid1, current->pid);
 	if (mode == 0) {
 		if(!list_empty(&root_devices.list)){
@@ -351,11 +357,22 @@ int esm_ctl(int mode, int pid1, int pid2) {
 			print_debug_task_event_queue(task);
 			print_debug_task_event_queue(task_new);
 
+			// Transfer all registered handlers to new task
 			list_for_each(pos, &(root_devices.list)){
 				app = list_entry(pos, application_l, list);
 				if (app->task == task) {
 					app->task = task_new;
 				}
+			}
+
+			// Transfer all queued events to new task
+			if(!list_empty(&(task->event_queue.event_queue))){
+				spin_lock(&task_new->event_queue_lock);
+				list_for_each_safe(pos_one, q, &(task->event_queue.event_queue)){
+					ev_queue = list_entry(pos_one, struct event_queue_t, event_queue);
+					list_move(&(ev_queue->event_queue), &(task_new->event_queue.event_queue));
+				}
+				spin_unlock(&task_new->event_queue_lock);
 			}
 
 			// Debug Statement

@@ -11,6 +11,7 @@
 
 
 // TODO: Change all instances of input_value to input_event, include timestamp in evdev.c when invoking esm_interpret
+// TODO: Change the linked-list added to task_struct in sched.h to a kfifo. This may help with the input jitters.
 
 #include <linux/input.h>	//struct input_value
 #include <linux/sched.h>
@@ -194,7 +195,7 @@ void esm_dispatch(struct work_struct* work){
 	spin_lock(&application->task->event_queue_lock);
 	event_queue_item->event = event;
 	event_queue_item->ep_event = application->ep_event;
-	list_add(&(event_queue_item->event_queue), &(application->task->event_queue.event_queue));
+	list_add_tail(&(event_queue_item->event_queue), &(application->task->event_queue.event_queue));
 	spin_unlock(&application->task->event_queue_lock);
 
 	// Attempt to wake up the process from esm_wait

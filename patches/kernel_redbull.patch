@@ -1,0 +1,1071 @@
+diff --git a/Android.bp b/Android.bp.disabled
+similarity index 100%
+rename from Android.bp
+rename to Android.bp.disabled
+diff --git a/arch/arm/tools/syscall.tbl b/arch/arm/tools/syscall.tbl
+index 717426d5..218546c1 100644
+--- a/arch/arm/tools/syscall.tbl
++++ b/arch/arm/tools/syscall.tbl
+@@ -416,3 +416,15 @@
+ 399	common	io_pgetevents		sys_io_pgetevents
+ 424	common  pidfd_send_signal	sys_pidfd_send_signal
+ 434	common	pidfd_open		sys_pidfd_open
++435	common	clone3			sys_ni_syscall
++436	common	close_range		sys_ni_syscall
++437	common	openat2			sys_ni_syscall
++438	common	pidfd_getfd		sys_ni_syscall
++439	common	faccessat2		sys_ni_syscall
++440	common	process_madvise		sys_ni_syscall
++441	common	epoll_pwait2		sys_ni_syscall
++442	common	mount_setattr		sys_ni_syscall
++443	common	esm_register		sys_esm_register
++444	common	esm_wait		sys_esm_wait
++445	common	esm_ctl			sys_esm_ctl
++446	common	is_in_esm_wait		sys_is_in_esm_wait
+diff --git a/drivers/input/evdev.c b/drivers/input/evdev.c
+index 05c617bf..9dbff33f 100644
+--- a/drivers/input/evdev.c
++++ b/drivers/input/evdev.c
+@@ -26,6 +26,7 @@
+ #include <linux/major.h>
+ #include <linux/device.h>
+ #include <linux/cdev.h>
++#include <linux/esm.h>
+ #include "input-compat.h"
+ 
+ struct evdev {
+@@ -52,6 +53,7 @@ struct evdev_client {
+ 	enum input_clock_type clk_type;
+ 	bool revoked;
+ 	unsigned long *evmasks[EV_CNT];
++	struct file *file;  /* ESM: File pointer for this client */
+ 	unsigned int bufsize;
+ 	struct input_event buffer[];
+ };
+@@ -309,6 +311,42 @@ static void evdev_events(struct input_handle *handle,
+ 			evdev_pass_values(client, vals, count, ev_time);
+ 
+ 	rcu_read_unlock();
++
++	/*
++	 * ESM (Event Stream Model) integration: Push events to ESM-registered processes
++	 *
++	 * This provides push-based event delivery as an alternative to epoll polling.
++	 * Iterate through all evdev clients and push events to those using ESM.
++	 */
++	{
++		const struct input_value *v;
++		struct input_event event;
++		struct timespec64 ts;
++
++		ts = ktime_to_timespec64(ev_time[CLOCK_MONOTONIC]);
++		event.input_event_sec = ts.tv_sec;
++		event.input_event_usec = ts.tv_nsec / NSEC_PER_USEC;
++
++		/* Push each event in the batch to ESM */
++		for (v = vals; v != vals + count; v++) {
++			struct file *filp = NULL;
++			event.type = v->type;
++			event.code = v->code;
++			event.value = v->value;
++
++			/* Get file pointer from first client (ESM handles multi-process distribution) */
++			rcu_read_lock();
++			client = list_first_or_null_rcu(&evdev->client_list,
++			                                 struct evdev_client, node);
++			if (client && client->file)
++				filp = client->file;
++			rcu_read_unlock();
++
++			/* Push once to ESM - it will distribute to all registered processes */
++			if (filp)
++				esm_push_event(filp, &event);
++		}
++	}
+ }
+ 
+ /*
+@@ -454,10 +492,14 @@ static int evdev_release(struct inode *inode, struct file *file)
+ 	for (i = 0; i < EV_CNT; ++i)
+ 		bitmap_free(client->evmasks[i]);
+ 
++	client->file = NULL;  /* ESM: Clear file pointer before freeing */
+ 	kvfree(client);
+ 
+ 	evdev_close_device(evdev);
+ 
++	/* ESM: Clean up any ESM registrations for this file */
++	esm_file_close(file);
++
+ 	return 0;
+ }
+ 
+@@ -488,6 +530,7 @@ static int evdev_open(struct inode *inode, struct file *file)
+ 	client->bufsize = bufsize;
+ 	spin_lock_init(&client->buffer_lock);
+ 	client->evdev = evdev;
++	client->file = file;  /* ESM: Store file pointer for esm_push_event() */
+ 	evdev_attach_client(evdev, client);
+ 
+ 	error = evdev_open_device(evdev);
+diff --git a/fs/proc/array.c b/fs/proc/array.c
+index 9eb99a43..6a5bfd36 100644
+--- a/fs/proc/array.c
++++ b/fs/proc/array.c
+@@ -130,17 +130,28 @@ void proc_task_name(struct seq_file *m, struct task_struct *p, bool escape)
+ static const char * const task_state_array[] = {
+ 
+ 	/* states in TASK_REPORT: */
+-	"R (running)",		/* 0x00 */
+-	"S (sleeping)",		/* 0x01 */
+-	"D (disk sleep)",	/* 0x02 */
+-	"T (stopped)",		/* 0x04 */
+-	"t (tracing stop)",	/* 0x08 */
+-	"X (dead)",		/* 0x10 */
+-	"Z (zombie)",		/* 0x20 */
+-	"P (parked)",		/* 0x40 */
+-
+-	/* states beyond TASK_REPORT: */
+-	"I (idle)",		/* 0x80 */
++	"R (running)",		/* 0x0000 - position 0 */
++	"S (sleeping)",		/* 0x0001 - position 1 */
++	"D (disk sleep)",	/* 0x0002 - position 2 */
++	"T (stopped)",		/* 0x0004 - position 3 */
++	"t (tracing stop)",	/* 0x0008 - position 4 */
++	"X (dead)",		/* 0x0010 - position 5 */
++	"Z (zombie)",		/* 0x0020 - position 6 */
++	"P (parked)",		/* 0x0040 - position 7 */
++
++	/* states not in TASK_REPORT (placeholders): */
++	"?",			/* 0x0080 - position 8 - TASK_DEAD (not reportable) */
++	"?",			/* 0x0100 - position 9 - TASK_WAKEKILL (not reportable) */
++	"?",			/* 0x0200 - position 10 - TASK_WAKING (not reportable) */
++	"?",			/* 0x0400 - position 11 - TASK_NOLOAD (not reportable) */
++	"?",			/* 0x0800 - position 12 - TASK_NEW (not reportable) */
++	"?",			/* 0x1000 - position 13 - unused */
++
++	/* ESM state: */
++	"E (event wait)",	/* 0x2000 - position 14 - TASK_EV_WAIT (ESM) */
++
++	/* IDLE state: */
++	"I (idle)",		/* 0x4000 - position 15 - TASK_REPORT_IDLE */
+ };
+ 
+ static inline const char *get_task_state(struct task_struct *tsk)
+diff --git a/gen_headers_arm.bp b/gen_headers_arm.bp.disabled
+similarity index 100%
+rename from gen_headers_arm.bp
+rename to gen_headers_arm.bp.disabled
+diff --git a/gen_headers_arm64.bp b/gen_headers_arm64.bp.disabled
+similarity index 100%
+rename from gen_headers_arm64.bp
+rename to gen_headers_arm64.bp.disabled
+diff --git a/include/linux/esm.h b/include/linux/esm.h
+new file mode 100644
+index 00000000..50b68da1
+--- /dev/null
++++ b/include/linux/esm.h
+@@ -0,0 +1,35 @@
++/*
++ * ESM (Event Stream Model) - Kernel header
++ *
++ * This file defines the kernel-side ESM interface.
++ */
++
++#ifndef _LINUX_ESM_H
++#define _LINUX_ESM_H
++
++#include <linux/input.h>
++
++/* ESM control commands for esm_ctl() */
++#define ESM_CTL_UNREGISTER_ALL  0
++#define ESM_CTL_GET_STATS       1
++
++/* ESM statistics structure */
++struct esm_stats {
++	unsigned long events_received;
++	unsigned long events_delivered;
++	unsigned long wakeups;
++};
++
++#ifdef __KERNEL__
++
++/* Kernel-only functions */
++int esm_push_event(struct file *filp, struct input_event *event);
++
++/* Cleanup functions */
++struct task_struct;
++void esm_exit_task(struct task_struct *task);
++void esm_file_close(struct file *filp);
++
++#endif /* __KERNEL__ */
++
++#endif /* _LINUX_ESM_H */
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index c181e71f..4d8266f5 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -85,7 +85,8 @@ struct task_group;
+ #define TASK_WAKING			0x0200
+ #define TASK_NOLOAD			0x0400
+ #define TASK_NEW			0x0800
+-#define TASK_STATE_MAX			0x1000
++#define TASK_EV_WAIT			0x2000  /* ESM: Waiting for input events */
++#define TASK_STATE_MAX			0x4000
+ 
+ /* Convenience macros for the sake of set_current_state: */
+ #define TASK_KILLABLE			(TASK_WAKEKILL | TASK_UNINTERRUPTIBLE)
+@@ -101,12 +102,14 @@ struct task_group;
+ #define TASK_REPORT			(TASK_RUNNING | TASK_INTERRUPTIBLE | \
+ 					 TASK_UNINTERRUPTIBLE | __TASK_STOPPED | \
+ 					 __TASK_TRACED | EXIT_DEAD | EXIT_ZOMBIE | \
+-					 TASK_PARKED)
++					 TASK_PARKED | TASK_EV_WAIT)
+ 
+ #define task_is_traced(task)		((task->state & __TASK_TRACED) != 0)
+ 
+ #define task_is_stopped(task)		((task->state & __TASK_STOPPED) != 0)
+ 
++#define task_is_ev_wait(task)		((task->state & TASK_EV_WAIT) != 0)
++
+ #define task_is_stopped_or_traced(task)	((task->state & (__TASK_STOPPED | __TASK_TRACED)) != 0)
+ 
+ #define task_contributes_to_load(task)	((task->state & TASK_UNINTERRUPTIBLE) != 0 && \
+@@ -1636,7 +1639,11 @@ static inline pid_t task_pgrp_nr(struct task_struct *tsk)
+ 	return task_pgrp_nr_ns(tsk, &init_pid_ns);
+ }
+ 
+-#define TASK_REPORT_IDLE	(TASK_REPORT + 1)
++/* ESM: Override TASK_REPORT_IDLE to avoid collision with TASK_EV_WAIT
++ * Since TASK_EV_WAIT uses bit 13 (0x2000), IDLE needs bit 14 (0x4000)
++ * to get a different fls() value
++ */
++#define TASK_REPORT_IDLE	0x4000
+ #define TASK_REPORT_MAX		(TASK_REPORT_IDLE << 1)
+ 
+ static inline unsigned int task_state_index(struct task_struct *tsk)
+@@ -1654,7 +1661,20 @@ static inline unsigned int task_state_index(struct task_struct *tsk)
+ 
+ static inline char task_index_to_char(unsigned int state)
+ {
+-	static const char state_char[] = "RSDTtXZPI";
++	/* Character map for task states (indexed by bit position via fls())
++	 * Position 0: R = RUNNING
++	 * Position 1: S = INTERRUPTIBLE (0x0001)
++	 * Position 2: D = UNINTERRUPTIBLE (0x0002)
++	 * Position 3: T = STOPPED (0x0004)
++	 * Position 4: t = TRACED (0x0008)
++	 * Position 5: X = DEAD (0x0010)
++	 * Position 6: Z = ZOMBIE (0x0020)
++	 * Position 7: P = PARKED (0x0040)
++	 * Position 8-13: . = Not in TASK_REPORT (0x0080-0x1000 except 0x2000)
++	 * Position 14: E = EV_WAIT (0x2000, ESM input event wait)
++	 * Position 15: I = IDLE (special case, TASK_REPORT_IDLE = 0x4000)
++	 */
++	static const char state_char[] = "RSDTtXZP......EI";
+ 
+ 	BUILD_BUG_ON(1 + ilog2(TASK_REPORT_MAX) != sizeof(state_char) - 1);
+ 
+diff --git a/include/uapi/asm-generic/unistd.h b/include/uapi/asm-generic/unistd.h
+index be311b94..acea50fa 100644
+--- a/include/uapi/asm-generic/unistd.h
++++ b/include/uapi/asm-generic/unistd.h
+@@ -740,9 +740,38 @@ __SYSCALL(__NR_rseq, sys_rseq)
+ __SYSCALL(__NR_pidfd_send_signal, sys_pidfd_send_signal)
+ #define __NR_pidfd_open 434
+ __SYSCALL(__NR_pidfd_open, sys_pidfd_open)
++#define __NR_clone3 435
++__SYSCALL(__NR_clone3, sys_ni_syscall)
++#define __NR_close_range 436
++__SYSCALL(__NR_close_range, sys_ni_syscall)
++#define __NR_openat2 437
++__SYSCALL(__NR_openat2, sys_ni_syscall)
++#define __NR_pidfd_getfd 438
++__SYSCALL(__NR_pidfd_getfd, sys_ni_syscall)
++#define __NR_faccessat2 439
++__SYSCALL(__NR_faccessat2, sys_ni_syscall)
++#define __NR_process_madvise 440
++__SYSCALL(__NR_process_madvise, sys_ni_syscall)
++#define __NR_epoll_pwait2 441
++__SYSCALL(__NR_epoll_pwait2, sys_ni_syscall)
++#define __NR_mount_setattr 442
++__SYSCALL(__NR_mount_setattr, sys_ni_syscall)
+ 
+ #undef __NR_syscalls
+-#define __NR_syscalls 435
++#define __NR_syscalls 443
++
++/* kernel/esm.c - Event Stream Model */
++#define __NR_esm_register 443
++__SYSCALL(__NR_esm_register, sys_esm_register)
++#define __NR_esm_wait 444
++__SYSCALL(__NR_esm_wait, sys_esm_wait)
++#define __NR_esm_ctl 445
++__SYSCALL(__NR_esm_ctl, sys_esm_ctl)
++#define __NR_is_in_esm_wait 446
++__SYSCALL(__NR_is_in_esm_wait, sys_is_in_esm_wait)
++
++#undef __NR_syscalls
++#define __NR_syscalls 447
+ 
+ /*
+  * 32 bit systems traditionally used different
+diff --git a/include/uapi/linux/esm.h b/include/uapi/linux/esm.h
+new file mode 100644
+index 00000000..52fe20ae
+--- /dev/null
++++ b/include/uapi/linux/esm.h
+@@ -0,0 +1,35 @@
++/*
++ * ESM (Event Stream Model) - Userspace API
++ *
++ * This file defines the userspace interface for ESM.
++ */
++
++#ifndef _UAPI_LINUX_ESM_H
++#define _UAPI_LINUX_ESM_H
++
++#include <linux/types.h>
++#include <linux/input.h>
++
++/* ESM control commands for esm_ctl() */
++#define ESM_CTL_UNREGISTER_ALL  0
++#define ESM_CTL_GET_STATS       1
++
++/* ESM statistics structure */
++struct esm_stats {
++	__u64 events_received;
++	__u64 events_delivered;
++	__u64 wakeups;
++};
++
++/*
++ * ESM event structure - returned by esm_wait()
++ *
++ * This structure includes both the file descriptor and the event,
++ * so the caller knows which device the event came from.
++ */
++struct esm_event {
++	int fd;                    /* File descriptor that generated this event */
++	struct input_event event;  /* The actual input event */
++};
++
++#endif /* _UAPI_LINUX_ESM_H */
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 150c8bfb..59ef0a2a 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -10,7 +10,7 @@ obj-y     = fork.o exec_domain.o panic.o \
+ 	    extable.o params.o \
+ 	    kthread.o sys_ni.o nsproxy.o \
+ 	    notifier.o ksysfs.o cred.o reboot.o \
+-	    async.o range.o smpboot.o ucount.o
++	    async.o range.o smpboot.o ucount.o esm.o
+ 
+ obj-$(CONFIG_MODULES) += kmod.o
+ obj-$(CONFIG_MULTIUSER) += groups.o
+diff --git a/kernel/esm.c b/kernel/esm.c
+new file mode 100644
+index 00000000..370e6d8f
+--- /dev/null
++++ b/kernel/esm.c
+@@ -0,0 +1,679 @@
++/*
++ * ESM (Event Stream Model) - Push-based event delivery for Android
++ *
++ * Replaces polling-based event handling with direct event push to applications.
++ * This reduces latency and power consumption by eliminating polling loops.
++ *
++ * Copyright (C) 2025
++ *
++ * Based on research by Stephen Marz and Brad Vander Zanden, University of Tennessee
++ */
++
++#include <linux/kernel.h>
++#include <linux/syscalls.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++#include <linux/wait.h>
++#include <linux/sched.h>
++#include <linux/sched/signal.h>
++#include <linux/kfifo.h>
++#include <linux/input.h>
++#include <linux/uaccess.h>
++#include <linux/hashtable.h>
++#include <linux/fs.h>
++#include <linux/file.h>
++#include <uapi/linux/esm.h>
++
++/* ESM constants */
++#define ESM_EVENT_QUEUE_SIZE    256     /* Events per registered device */
++#define ESM_MAX_DEVICES         32      /* Max input devices per process */
++#define ESM_HASH_BITS           6       /* Hash table size for device lookup */
++
++/*
++ * Global list of all ESM contexts (for esm_push_event reverse lookup)
++ * Protected by esm_global_lock
++ *
++ * TODO: Optimize by adding ESM context pointer directly to task_struct
++ */
++static LIST_HEAD(esm_context_list);
++static DEFINE_SPINLOCK(esm_global_lock);
++
++/*
++ * ESM device registration structure
++ *
++ * Each registered input device gets one of these.
++ * Uses kfifo for event queue (fixes Android 7 linked-list jitter issue).
++ */
++struct esm_device {
++	int fd;                                    /* File descriptor */
++	struct file *filp;                         /* File pointer */
++	struct inode *inode;                       /* Inode for matching */
++	unsigned long event_mask;                  /* Event types to receive */
++
++	/* Event queue - using kfifo instead of linked list to fix jitter */
++	DECLARE_KFIFO(event_queue, struct input_event, ESM_EVENT_QUEUE_SIZE);
++
++	/* Synchronization batch buffer for handling EV_SYN properly */
++	struct input_event sync_batch[ESM_EVENT_QUEUE_SIZE];
++	int sync_batch_count;                      /* Events in current batch */
++
++	spinlock_t lock;                           /* Protects queue and batch */
++	struct hlist_node hash_node;               /* For hash table lookup */
++};
++
++/*
++ * ESM process control block extension
++ *
++ * Each process that uses ESM gets one of these attached to task_struct.
++ * Stores all registered devices and wait queue.
++ */
++struct esm_context {
++	/* Hash table of registered devices (indexed by fd) */
++	DECLARE_HASHTABLE(devices, ESM_HASH_BITS);
++
++	/* Wait queue for esm_wait() */
++	wait_queue_head_t wait_queue;
++
++	/* Statistics */
++	unsigned long events_received;
++	unsigned long events_delivered;
++
++	spinlock_t lock;                           /* Protects context */
++
++	/* Link in global context list */
++	struct list_head list;
++	struct task_struct *task;                  /* Owner task */
++};
++
++/* Function prototypes */
++static struct esm_context *esm_get_context(struct task_struct *task);
++static void esm_free_context(struct esm_context *ctx);
++static struct esm_device *esm_find_device(struct esm_context *ctx, int fd);
++
++/* Forward declaration for cleanup functions */
++void esm_exit_task(struct task_struct *task);
++void esm_file_close(struct file *filp);
++
++/*
++ * esm_get_context - Get or create ESM context for current task
++ *
++ * TODO: Optimize by caching in task_struct instead of searching list
++ */
++static struct esm_context *esm_get_context(struct task_struct *task)
++{
++	struct esm_context *ctx;
++	unsigned long flags;
++
++	/* Search for existing context in global list */
++	spin_lock_irqsave(&esm_global_lock, flags);
++	list_for_each_entry(ctx, &esm_context_list, list) {
++		if (ctx->task == task) {
++			spin_unlock_irqrestore(&esm_global_lock, flags);
++			return ctx;
++		}
++	}
++	spin_unlock_irqrestore(&esm_global_lock, flags);
++
++	/* Create new context */
++	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
++	if (!ctx)
++		return NULL;
++
++	hash_init(ctx->devices);
++	init_waitqueue_head(&ctx->wait_queue);
++	spin_lock_init(&ctx->lock);
++	INIT_LIST_HEAD(&ctx->list);
++	ctx->task = task;
++
++	/* Add to global list */
++	spin_lock_irqsave(&esm_global_lock, flags);
++	list_add(&ctx->list, &esm_context_list);
++	spin_unlock_irqrestore(&esm_global_lock, flags);
++
++	return ctx;
++}
++
++/*
++ * esm_free_context - Free ESM context and all registered devices
++ */
++static void esm_free_context(struct esm_context *ctx)
++{
++	struct esm_device *dev;
++	struct hlist_node *tmp;
++	unsigned long flags;
++	int bkt;
++
++	if (!ctx)
++		return;
++
++	/* Remove from global list */
++	spin_lock_irqsave(&esm_global_lock, flags);
++	list_del(&ctx->list);
++	spin_unlock_irqrestore(&esm_global_lock, flags);
++
++	/* Free all registered devices */
++	hash_for_each_safe(ctx->devices, bkt, tmp, dev, hash_node) {
++		hash_del(&dev->hash_node);
++		fput(dev->filp);  /* Release file reference */
++		kfree(dev);
++	}
++
++	kfree(ctx);
++}
++
++/*
++ * esm_find_device - Find registered device by file descriptor
++ */
++static struct esm_device *esm_find_device(struct esm_context *ctx, int fd)
++{
++	struct esm_device *dev;
++
++	hash_for_each_possible(ctx->devices, dev, hash_node, fd) {
++		if (dev->fd == fd)
++			return dev;
++	}
++
++	return NULL;
++}
++
++/*
++ * SYSCALL: esm_register
++ *
++ * Register an input device file descriptor with ESM.
++ *
++ * @fd: File descriptor of input device (e.g., /dev/input/event0)
++ * @events: Event mask (which event types to receive)
++ *
++ * Returns: 0 on success, negative error code on failure
++ *
++ * Usage:
++ *   int fd = open("/dev/input/event0", O_RDONLY);
++ *   esm_register(fd, EV_KEY | EV_ABS);  // Register for key and touch events
++ */
++SYSCALL_DEFINE2(esm_register, int, fd, unsigned long, events)
++{
++	struct esm_context *ctx;
++	struct esm_device *dev;
++	struct file *filp;
++	unsigned long flags;
++
++	/* Validate file descriptor */
++	filp = fget(fd);
++	if (!filp)
++		return -EBADF;
++
++	/* Get or create ESM context for current process */
++	ctx = esm_get_context(current);
++	if (!ctx) {
++		fput(filp);
++		return -ENOMEM;
++	}
++
++	spin_lock_irqsave(&ctx->lock, flags);
++
++	/* Check if device already registered */
++	dev = esm_find_device(ctx, fd);
++	if (dev) {
++		/* Update event mask */
++		dev->event_mask = events;
++		spin_unlock_irqrestore(&ctx->lock, flags);
++		fput(filp);  /* Already have reference */
++		return 0;
++	}
++
++	/* Allocate new device structure */
++	dev = kzalloc(sizeof(*dev), GFP_ATOMIC);
++	if (!dev) {
++		spin_unlock_irqrestore(&ctx->lock, flags);
++		fput(filp);
++		return -ENOMEM;
++	}
++
++	/* Initialize device */
++	dev->fd = fd;
++	dev->filp = filp;
++	dev->inode = filp->f_inode;  /* Store inode for reliable matching */
++	dev->event_mask = events;
++	INIT_KFIFO(dev->event_queue);
++	dev->sync_batch_count = 0;
++	spin_lock_init(&dev->lock);
++
++	/* Add to hash table */
++	hash_add(ctx->devices, &dev->hash_node, fd);
++
++	spin_unlock_irqrestore(&ctx->lock, flags);
++
++	printk(KERN_DEBUG "ESM: Registered fd=%d inode=%p filp=%p with event_mask=0x%lx\n",
++	       fd, dev->inode, dev->filp, events);
++
++	return 0;
++}
++
++/*
++ * SYSCALL: esm_wait
++ *
++ * Wait for input events on registered devices.
++ * Puts process in TASK_EV_WAIT state until events arrive.
++ *
++ * @buffer: User-space buffer to receive esm_event structures
++ * @count: Maximum number of events to receive
++ * @timeout_ms: Timeout in milliseconds (-1 = infinite)
++ *
++ * Returns: Number of events received, or negative error code
++ *
++ * Usage:
++ *   struct esm_event events[32];
++ *   int n = esm_wait(events, 32, -1);  // Wait forever
++ *   for (int i = 0; i < n; i++) {
++ *       printf("fd=%d event: type=%d code=%d value=%d\n",
++ *              events[i].fd, events[i].event.type, ...);
++ *   }
++ *
++ * IMPORTANT: This properly handles EV_SYN batching.
++ * Events are buffered until EV_SYN/SYN_REPORT, then delivered as a batch.
++ * This fixes the Android 7 EV_SYN handling issue.
++ */
++SYSCALL_DEFINE3(esm_wait, struct esm_event __user *, buffer,
++                size_t, count, int, timeout_ms)
++{
++	struct esm_context *ctx;
++	struct esm_device *dev;
++	struct esm_event *batch;
++	int batch_count = 0;
++	int bkt;
++	unsigned long flags;
++	long timeout_jiffies;
++	int ret;
++
++	if (!buffer || count == 0)
++		return -EINVAL;
++
++	batch = kmalloc(count * sizeof(struct esm_event), GFP_KERNEL);
++	if (!batch)
++		return -ENOMEM;
++
++	ctx = esm_get_context(current);
++	if (!ctx) {
++		ret = -ENOMEM;
++		goto out_free;
++	}
++
++	/* Convert timeout to jiffies */
++	if (timeout_ms < 0)
++		timeout_jiffies = MAX_SCHEDULE_TIMEOUT;
++	else
++		timeout_jiffies = msecs_to_jiffies(timeout_ms);
++
++	/*
++	 * Main wait loop
++	 *
++	 * Task enters TASK_EV_WAIT state and sleeps until events arrive.
++	 */
++wait_again:
++	/* Check all registered devices for events */
++	spin_lock_irqsave(&ctx->lock, flags);
++
++	hash_for_each(ctx->devices, bkt, dev, hash_node) {
++		unsigned long dev_flags;
++		struct input_event event;
++
++		spin_lock_irqsave(&dev->lock, dev_flags);
++
++		/* Drain events from this device's kfifo */
++		while (batch_count < count &&
++		       kfifo_out(&dev->event_queue, &event, 1)) {
++
++			/* Store event with fd information */
++			batch[batch_count].fd = dev->fd;
++			batch[batch_count].event = event;
++			batch_count++;
++
++			/* If we hit EV_SYN/SYN_REPORT, deliver batch now */
++			if (event.type == EV_SYN && event.code == SYN_REPORT) {
++				spin_unlock_irqrestore(&dev->lock, dev_flags);
++				spin_unlock_irqrestore(&ctx->lock, flags);
++
++				/* Copy batch to userspace */
++				if (copy_to_user(buffer, batch,
++				                 batch_count * sizeof(struct esm_event))) {
++					ret = -EFAULT;
++					goto out_free;
++				}
++
++				ctx->events_delivered += batch_count;
++				ret = batch_count;
++				goto out_free;
++			}
++		}
++
++		spin_unlock_irqrestore(&dev->lock, dev_flags);
++	}
++
++	spin_unlock_irqrestore(&ctx->lock, flags);
++
++	/* If we got events but no EV_SYN yet, keep waiting (with small timeout) */
++	if (batch_count > 0 && batch_count < count) {
++		/* Give a 10ms grace period for EV_SYN to arrive */
++		timeout_jiffies = msecs_to_jiffies(10);
++		goto do_wait;
++	}
++
++	/* If we got a full buffer without EV_SYN, deliver what we have */
++	if (batch_count >= count) {
++		if (copy_to_user(buffer, batch,
++		                 batch_count * sizeof(struct esm_event))) {
++			ret = -EFAULT;
++			goto out_free;
++		}
++
++		ctx->events_delivered += batch_count;
++		ret = batch_count;
++		goto out_free;
++	}
++
++do_wait:
++
++	/*
++	 * No events available - sleep in TASK_EV_WAIT state
++	 *
++	 * This is the key ESM innovation: instead of TASK_INTERRUPTIBLE,
++	 * we use TASK_EV_WAIT to signal the scheduler that this process
++	 * is specifically waiting for input events.
++	 */
++	{
++		DEFINE_WAIT(wait);
++		long remaining = timeout_jiffies;
++
++		prepare_to_wait(&ctx->wait_queue, &wait, TASK_EV_WAIT | TASK_INTERRUPTIBLE);
++
++		/* Check again for events after adding to wait queue (race avoidance) */
++		spin_lock_irqsave(&ctx->lock, flags);
++		hash_for_each(ctx->devices, bkt, dev, hash_node) {
++			if (!kfifo_is_empty(&dev->event_queue)) {
++				spin_unlock_irqrestore(&ctx->lock, flags);
++				finish_wait(&ctx->wait_queue, &wait);
++				goto wait_again;  /* Events arrived */
++			}
++		}
++		spin_unlock_irqrestore(&ctx->lock, flags);
++
++		/* No events - go to sleep in TASK_EV_WAIT state */
++		if (remaining == MAX_SCHEDULE_TIMEOUT) {
++			schedule();
++			remaining = MAX_SCHEDULE_TIMEOUT;
++		} else {
++			remaining = schedule_timeout(remaining);
++		}
++
++		finish_wait(&ctx->wait_queue, &wait);
++
++		/* Check why we woke up */
++		if (signal_pending(current)) {
++			ret = -ERESTARTSYS;  /* Interrupted by signal */
++			goto out_free;
++		}
++
++		if (remaining == 0 && timeout_jiffies != MAX_SCHEDULE_TIMEOUT) {
++			ret = -ETIMEDOUT;  /* Timeout expired */
++			goto out_free;
++		}
++
++		/* Events arrived - go back to top of loop */
++		goto wait_again;
++	}
++
++out_free:
++	kfree(batch);
++	return ret;
++}
++
++/*
++ * SYSCALL: esm_ctl
++ *
++ * Control ESM behavior (for multi-threaded apps like InputFlinger).
++ *
++ * @cmd: Command to execute
++ * @arg: Command-specific argument
++ *
++ * Commands:
++ *   ESM_CTL_UNREGISTER_ALL: Unregister all devices
++ *   ESM_CTL_GET_STATS: Get statistics
++ *
++ * Returns: 0 on success, negative error code on failure
++ */
++SYSCALL_DEFINE2(esm_ctl, int, cmd, unsigned long, arg)
++{
++	struct esm_context *ctx;
++
++	ctx = esm_get_context(current);
++	if (!ctx)
++		return -ENOMEM;
++
++	switch (cmd) {
++	case 0:  /* ESM_CTL_UNREGISTER_ALL */
++		esm_free_context(ctx);
++		return 0;
++
++	case 1:  /* ESM_CTL_GET_STATS */
++		/* TODO: Copy stats to userspace */
++		return 0;
++
++	default:
++		return -EINVAL;
++	}
++}
++
++/*
++ * esm_push_event - Push event to processes (called from input driver)
++ *
++ * This is called by the input subsystem when an event occurs.
++ * It finds all processes registered for this device and pushes
++ * the event to their queues, then wakes them up.
++ *
++ * @filp: File pointer to input device
++ * @event: Input event to deliver
++ *
++ * Returns: Number of processes that received the event
++ *
++ * Called from input driver interrupt context, must be fast!
++ */
++int esm_push_event(struct file *filp, struct input_event *event)
++{
++	struct esm_context *ctx;
++	unsigned long global_flags, ctx_flags, dev_flags;
++	int delivered = 0;
++	struct inode *inode;
++	static int debug_count = 0;  /* Debug: Log first few pushes to diagnose matching */
++
++	if (!filp || !event)
++		return 0;
++
++	inode = filp->f_inode;
++	if (!inode)
++		return 0;
++	if (debug_count < 20) {
++		printk(KERN_DEBUG "ESM: push_event inode=%p filp=%p type=%d code=%d value=%d\n",
++		       inode, filp, event->type, event->code, event->value);
++		debug_count++;
++	}
++
++	/* Iterate through all ESM contexts */
++	spin_lock_irqsave(&esm_global_lock, global_flags);
++
++	list_for_each_entry(ctx, &esm_context_list, list) {
++		struct esm_device *dev;
++		int bkt;
++		int found = 0;
++
++		spin_lock_irqsave(&ctx->lock, ctx_flags);
++
++		/* Find if this context has registered this file - use inode for robust matching */
++		hash_for_each(ctx->devices, bkt, dev, hash_node) {
++			if (dev->inode == inode) {
++				/* Check if event type matches mask */
++				if (dev->event_mask & (1UL << event->type)) {
++					spin_lock_irqsave(&dev->lock, dev_flags);
++
++					/* Push event to kfifo */
++					if (kfifo_in(&dev->event_queue, event, 1) == 1) {
++						ctx->events_received++;
++						found = 1;
++					} else {
++						/* Queue full - drop event */
++						printk_ratelimited(KERN_WARNING
++							"ESM: Event queue full for pid %d\n",
++							ctx->task->pid);
++					}
++
++					spin_unlock_irqrestore(&dev->lock, dev_flags);
++				}
++				break;  /* Device found, no need to continue */
++			}
++		}
++
++		spin_unlock_irqrestore(&ctx->lock, ctx_flags);
++
++		/* Wake up task if we delivered an event */
++		if (found) {
++			delivered++;
++			/* Wake up task waiting in TASK_EV_WAIT */
++			wake_up(&ctx->wait_queue);
++		}
++	}
++
++	spin_unlock_irqrestore(&esm_global_lock, global_flags);
++
++	if (delivered == 0 && debug_count < 50) {
++		printk_ratelimited(KERN_DEBUG "ESM: push_event delivered to 0 contexts (inode=%p)\n", inode);
++		debug_count++;
++	}
++
++	return delivered;
++}
++EXPORT_SYMBOL(esm_push_event);
++
++/*
++ * esm_file_close - Clean up ESM registrations when device file is closed
++ *
++ * Called from evdev_release() when a file descriptor is closed.
++ * Removes all ESM registrations for this file across all processes.
++ *
++ * @filp: File pointer being closed
++ *
++ * This handles device hotplug - when /dev/input/eventX is removed,
++ * all ESM registrations for that device are cleaned up.
++ */
++void esm_file_close(struct file *filp)
++{
++	struct esm_context *ctx;
++	struct esm_device *dev;
++	struct hlist_node *tmp;
++	unsigned long global_flags, ctx_flags;
++	struct inode *inode;
++	int bkt;
++	int removed = 0;
++
++	if (!filp)
++		return;
++
++	inode = filp->f_inode;
++	if (!inode)
++		return;
++
++	/* Iterate through all ESM contexts */
++	spin_lock_irqsave(&esm_global_lock, global_flags);
++
++	list_for_each_entry(ctx, &esm_context_list, list) {
++		spin_lock_irqsave(&ctx->lock, ctx_flags);
++
++		/* Find and remove devices with this inode */
++		hash_for_each_safe(ctx->devices, bkt, tmp, dev, hash_node) {
++			if (dev->inode == inode) {
++				hash_del(&dev->hash_node);
++				fput(dev->filp);  /* Release file reference */
++				kfree(dev);
++				removed++;
++			}
++		}
++
++		spin_unlock_irqrestore(&ctx->lock, ctx_flags);
++	}
++
++	spin_unlock_irqrestore(&esm_global_lock, global_flags);
++
++	if (removed > 0) {
++		printk(KERN_DEBUG "ESM: Removed %d device registrations for closed file (inode=%p)\n",
++		       removed, inode);
++	}
++}
++EXPORT_SYMBOL(esm_file_close);
++
++/*
++ * esm_exit_task - Clean up ESM context when process exits
++ *
++ * Called from do_exit() to prevent memory leaks.
++ * Removes the task's ESM context and frees all resources.
++ *
++ * @task: Task that is exiting
++ */
++void esm_exit_task(struct task_struct *task)
++{
++	struct esm_context *ctx;
++	unsigned long flags;
++
++	if (!task)
++		return;
++
++	/* Find this task's ESM context in global list */
++	spin_lock_irqsave(&esm_global_lock, flags);
++	list_for_each_entry(ctx, &esm_context_list, list) {
++		if (ctx->task == task) {
++			spin_unlock_irqrestore(&esm_global_lock, flags);
++
++			/* Found it - free the context */
++			esm_free_context(ctx);
++
++			printk(KERN_DEBUG "ESM: Cleaned up context for exiting task pid=%d\n",
++			       task->pid);
++			return;
++		}
++	}
++	spin_unlock_irqrestore(&esm_global_lock, flags);
++
++	/* No ESM context - task never used ESM */
++}
++EXPORT_SYMBOL(esm_exit_task);
++
++/*
++ * SYSCALL: is_in_esm_wait
++ *
++ * Check if a thread is currently blocked in esm_wait().
++ * Used by watchdog to distinguish ESM wait from deadlocks.
++ *
++ * @tid: Thread ID to check
++ *
++ * Returns: 1 if thread is in TASK_EV_WAIT state, 0 otherwise
++ */
++SYSCALL_DEFINE1(is_in_esm_wait, pid_t, tid)
++{
++	struct task_struct *task;
++	int in_esm_wait = 0;
++
++	/* Find the task by thread ID */
++	rcu_read_lock();
++	task = find_task_by_vpid(tid);
++	if (task) {
++		/* Check if task state includes TASK_EV_WAIT flag */
++		in_esm_wait = (task->state & TASK_EV_WAIT) ? 1 : 0;
++	}
++	rcu_read_unlock();
++
++	return in_esm_wait;
++}
++
++/*
++ * Module information
++ */
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Based on ESM research by Marz & Vander Zanden");
++MODULE_DESCRIPTION("Event Stream Model - Push-based input event delivery");
+diff --git a/kernel/exit.c b/kernel/exit.c
+index 81b8a3bc..31213fe9 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -27,6 +27,7 @@
+ #include <linux/fdtable.h>
+ #include <linux/freezer.h>
+ #include <linux/binfmts.h>
++#include <linux/esm.h>
+ #include <linux/nsproxy.h>
+ #include <linux/pid_namespace.h>
+ #include <linux/ptrace.h>
+@@ -865,6 +866,7 @@ void __noreturn do_exit(long code)
+ 	exit_sem(tsk);
+ 	exit_shm(tsk);
+ 	exit_files(tsk);
++	esm_exit_task(tsk);  /* ESM: Clean up event stream context */
+ 	exit_fs(tsk);
+ 	if (group_dead)
+ 		disassociate_ctty(1);

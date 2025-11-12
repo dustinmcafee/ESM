@@ -1,0 +1,155 @@
+diff --git a/build_esm_kernel.sh b/build_esm_kernel.sh
+new file mode 100755
+index 0000000..aa0b2a6
+--- /dev/null
++++ b/build_esm_kernel.sh
+@@ -0,0 +1,110 @@
++#!/bin/bash
++# ESM Kernel Build Script
++# This script is called by the AOSP build system to compile the kernel
++
++set -e
++
++# Detect AOSP root
++if [ -z "${ANDROID_BUILD_TOP}" ]; then
++    # Try to find AOSP root
++    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++    AOSP_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
++    export ANDROID_BUILD_TOP="${AOSP_ROOT}"
++fi
++
++# Set output directory
++if [ -z "${OUT_DIR}" ]; then
++    export OUT_DIR="${ANDROID_BUILD_TOP}/out"
++fi
++
++# Detect target product (support both redfin and aosp_redfin)
++if [ -z "${TARGET_PRODUCT}" ]; then
++    # Try to detect from OUT environment
++    if [ -n "${OUT}" ]; then
++        TARGET_PRODUCT=$(basename $(dirname ${OUT}))
++    else
++        TARGET_PRODUCT="aosp_redfin"
++    fi
++fi
++
++# Normalize product name - kernel output goes to aosp_redfin, final dest is redfin
++KERNEL_BUILD_PRODUCT="${TARGET_PRODUCT}"
++if [ "${TARGET_PRODUCT}" = "redfin" ]; then
++    KERNEL_BUILD_PRODUCT="aosp_redfin"
++fi
++KERNEL_OUTPUT_PRODUCT="redfin"  # Final output always goes to redfin
++
++KERNEL_SRC="${ANDROID_BUILD_TOP}/kernel_redbull_source"
++KERNEL_OUT="${OUT_DIR}/target/product/${KERNEL_BUILD_PRODUCT}/obj/ESM_KERNEL"
++KERNEL_IMAGE="${KERNEL_OUT}/arch/arm64/boot/Image.lz4-dtb"
++KERNEL_DEST="${OUT_DIR}/target/product/${KERNEL_OUTPUT_PRODUCT}/kernel"
++
++# Check if kernel is already built
++if [ -f "${KERNEL_IMAGE}" ]; then
++    echo "ESM kernel already built at ${KERNEL_IMAGE}"
++    echo "Copying to: ${KERNEL_DEST}"
++    mkdir -p "$(dirname ${KERNEL_DEST})"
++    cp -f "${KERNEL_IMAGE}" "${KERNEL_DEST}"
++
++    # Also copy to prebuilt directory
++    PREBUILT_KERNEL_DIR="${ANDROID_BUILD_TOP}/device/google/redbull-kernel"
++    echo "Copying to prebuilt: ${PREBUILT_KERNEL_DIR}/Image.lz4-dtb"
++    cp -f "${KERNEL_IMAGE}" "${PREBUILT_KERNEL_DIR}/Image.lz4-dtb"
++    exit 0
++fi
++
++echo "========================================="
++echo "Building ESM Kernel from source..."
++echo "Source: ${KERNEL_SRC}"
++echo "Output: ${KERNEL_OUT}"
++echo "========================================="
++
++# Create output directory
++mkdir -p "${KERNEL_OUT}"
++
++# Set up build environment
++export PATH="${ANDROID_BUILD_TOP}/prebuilts/clang/host/linux-x86/clang-r416183b/bin:${ANDROID_BUILD_TOP}/prebuilts/gas/linux-x86/bin:${PATH}"
++export LD_LIBRARY_PATH="${ANDROID_BUILD_TOP}/prebuilts/clang/host/linux-x86/clang-r416183b/lib64:${LD_LIBRARY_PATH}"
++
++# Configure kernel
++echo "Configuring kernel with redbull_defconfig..."
++make -C "${KERNEL_SRC}" O="${KERNEL_OUT}" \
++    ARCH=arm64 \
++    LLVM=1 \
++    LLVM_IAS=1 \
++    CLANG_TRIPLE=aarch64-linux-gnu- \
++    CROSS_COMPILE=aarch64-linux-gnu- \
++    CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
++    redbull_defconfig
++
++# Build kernel
++echo "Building kernel image..."
++make -C "${KERNEL_SRC}" O="${KERNEL_OUT}" \
++    ARCH=arm64 \
++    LLVM=1 \
++    LLVM_IAS=1 \
++    CLANG_TRIPLE=aarch64-linux-gnu- \
++    CROSS_COMPILE=aarch64-linux-gnu- \
++    CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
++    -j$(nproc) \
++    Image.lz4-dtb
++
++echo "========================================="
++echo "ESM Kernel build complete!"
++echo "Kernel image: ${KERNEL_IMAGE}"
++echo "========================================="
++
++# Copy to product output (ensure directory exists)
++echo "Copying kernel to: ${KERNEL_DEST}"
++mkdir -p "$(dirname ${KERNEL_DEST})"
++cp -f "${KERNEL_IMAGE}" "${KERNEL_DEST}"
++
++# Also copy to redbull-kernel prebuilt directory for AOSP build system
++PREBUILT_KERNEL_DIR="${ANDROID_BUILD_TOP}/device/google/redbull-kernel"
++echo "Copying ESM kernel to prebuilt directory: ${PREBUILT_KERNEL_DIR}/Image.lz4-dtb"
++cp -f "${KERNEL_IMAGE}" "${PREBUILT_KERNEL_DIR}/Image.lz4-dtb"
++
++echo ""
++echo "Kernel copied to:"
++echo "  - ${KERNEL_DEST}"
++echo "  - ${PREBUILT_KERNEL_DIR}/Image.lz4-dtb"
+diff --git a/device-redfin.mk b/device-redfin.mk
+index 6d6d43a..b126f09 100644
+--- a/device-redfin.mk
++++ b/device-redfin.mk
+@@ -16,15 +16,11 @@
+ 
+ PRODUCT_HARDWARE := redfin
+ 
+-ifeq ($(TARGET_PREBUILT_KERNEL),)
+-    ifneq (,$(filter userdebug eng, $(TARGET_BUILD_VARIANT)))
+-        LOCAL_KERNEL := device/google/redbull-kernel/Image.lz4
+-    else
+-        LOCAL_KERNEL := device/google/redbull-kernel/vintf/Image.lz4
+-    endif
+-else
+-    LOCAL_KERNEL := $(TARGET_PREBUILT_KERNEL)
+-endif
++# Include ESM kernel build from source
++include device/google/redfin/kernel/Android.mk
++
++# Use kernel built from source
++LOCAL_KERNEL := $(TARGET_PREBUILT_KERNEL)
+ 
+ PRODUCT_VENDOR_KERNEL_HEADERS := device/google/redbull-kernel/sm7250/kernel-headers
+ 
+diff --git a/kernel/Android.mk b/kernel/Android.mk
+new file mode 100644
+index 0000000..99d9609
+--- /dev/null
++++ b/kernel/Android.mk
+@@ -0,0 +1,8 @@
++LOCAL_PATH := $(call my-dir)
++
++# ESM Kernel Build Integration
++# The kernel must be built first using: ./build.sh -K
++# This copies the kernel to the redbull-kernel prebuilt directory
++
++# Use the ESM kernel from the redbull-kernel directory where build_esm_kernel.sh copies it
++TARGET_PREBUILT_KERNEL := device/google/redbull-kernel/Image.lz4-dtb

@@ -1,0 +1,327 @@
+diff --git a/services/inputflinger/InputThread.cpp b/services/inputflinger/InputThread.cpp
+index b87f7a1243..9553036d08 100644
+--- a/services/inputflinger/InputThread.cpp
++++ b/services/inputflinger/InputThread.cpp
+@@ -57,4 +57,8 @@ bool InputThread::isCallingThread() {
+     return gettid() == mThread->getTid();
+ }
+ 
++pid_t InputThread::getTid() {
++    return mThread->getTid();
++}
++
+ } // namespace android
+\ No newline at end of file
+diff --git a/services/inputflinger/include/InputThread.h b/services/inputflinger/include/InputThread.h
+index 407365a269..c987548ead 100644
+--- a/services/inputflinger/include/InputThread.h
++++ b/services/inputflinger/include/InputThread.h
+@@ -34,6 +34,7 @@ public:
+     virtual ~InputThread();
+ 
+     bool isCallingThread();
++    pid_t getTid();
+ 
+ private:
+     std::string mName;
+diff --git a/services/inputflinger/reader/EventHub.cpp b/services/inputflinger/reader/EventHub.cpp
+index b19b4195d1..b4131b20e7 100644
+--- a/services/inputflinger/reader/EventHub.cpp
++++ b/services/inputflinger/reader/EventHub.cpp
+@@ -24,8 +24,10 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <poll.h>
+ #include <sys/capability.h>
+ #include <sys/epoll.h>
++#include <sys/esm.h>
+ #include <sys/inotify.h>
+ #include <sys/ioctl.h>
+ #include <sys/limits.h>
+@@ -1458,12 +1460,11 @@ std::optional<int32_t> EventHub::getBatteryStatus(int32_t deviceId, int32_t batt
+     return std::nullopt;
+ }
+ 
+-size_t EventHub::getEvents(int timeoutMillis, RawEvent* buffer, size_t bufferSize) {
++size_t EventHub::getEvents(int timeoutMillis, RawEvent* buffer, size_t bufferSize)
++        NO_THREAD_SAFETY_ANALYSIS {
+     ALOG_ASSERT(bufferSize >= 1);
+ 
+-    std::scoped_lock _l(mLock);
+-
+-    struct input_event readBuffer[bufferSize];
++    std::unique_lock<std::mutex> _l(mLock);
+ 
+     RawEvent* event = buffer;
+     size_t capacity = bufferSize;
+@@ -1601,54 +1602,12 @@ size_t EventHub::getEvents(int timeoutMillis, RawEvent* buffer, size_t bufferSiz
+                 }
+                 continue;
+             }
+-            // This must be an input event
+-            if (eventItem.events & EPOLLIN) {
+-                int32_t readSize =
+-                        read(device->fd, readBuffer, sizeof(struct input_event) * capacity);
+-                if (readSize == 0 || (readSize < 0 && errno == ENODEV)) {
+-                    // Device was removed before INotify noticed.
+-                    ALOGW("could not get event, removed? (fd: %d size: %" PRId32
+-                          " bufferSize: %zu capacity: %zu errno: %d)\n",
+-                          device->fd, readSize, bufferSize, capacity, errno);
+-                    deviceChanged = true;
+-                    closeDeviceLocked(*device);
+-                } else if (readSize < 0) {
+-                    if (errno != EAGAIN && errno != EINTR) {
+-                        ALOGW("could not get event (errno=%d)", errno);
+-                    }
+-                } else if ((readSize % sizeof(struct input_event)) != 0) {
+-                    ALOGE("could not get event (wrong size: %d)", readSize);
+-                } else {
+-                    int32_t deviceId = device->id == mBuiltInKeyboardId ? 0 : device->id;
+-
+-                    size_t count = size_t(readSize) / sizeof(struct input_event);
+-                    for (size_t i = 0; i < count; i++) {
+-                        struct input_event& iev = readBuffer[i];
+-                        event->when = processEventTimestamp(iev);
+-                        event->readTime = systemTime(SYSTEM_TIME_MONOTONIC);
+-                        event->deviceId = deviceId;
+-                        event->type = iev.type;
+-                        event->code = iev.code;
+-                        event->value = iev.value;
+-                        event += 1;
+-                        capacity -= 1;
+-                    }
+-                    if (capacity == 0) {
+-                        // The result buffer is full.  Reset the pending event index
+-                        // so we will try to read the device again on the next iteration.
+-                        mPendingEventIndex -= 1;
+-                        break;
+-                    }
+-                }
+-            } else if (eventItem.events & EPOLLHUP) {
+-                ALOGI("Removing device %s due to epoll hang-up event.",
+-                      device->identifier.name.c_str());
+-                deviceChanged = true;
+-                closeDeviceLocked(*device);
+-            } else {
+-                ALOGW("Received unexpected epoll event 0x%08x for device %s.", eventItem.events,
+-                      device->identifier.name.c_str());
+-            }
++            // ESM: Input devices are no longer registered with epoll
++            // This should not be reached since input devices use ESM exclusively
++            // If we get here, it's an unexpected state
++            ALOGW("Received epoll event for input device fd %d (should use ESM only)",
++                  eventItem.data.fd);
++            ALOG_ASSERT(!DEBUG);
+         }
+ 
+         // readNotify() will modify the list of devices so this must be done after
+@@ -1670,44 +1629,100 @@ size_t EventHub::getEvents(int timeoutMillis, RawEvent* buffer, size_t bufferSiz
+             break;
+         }
+ 
+-        // Poll for events.
+-        // When a device driver has pending (unread) events, it acquires
+-        // a kernel wake lock.  Once the last pending event has been read, the device
+-        // driver will release the kernel wake lock, but the epoll will hold the wakelock,
+-        // since we are using EPOLLWAKEUP. The wakelock is released by the epoll when epoll_wait
+-        // is called again for the same fd that produced the event.
+-        // Thus the system can only sleep if there are no events pending or
+-        // currently being processed.
++        // ESM: Wait for events using push-based delivery
++        // This completely replaces epoll_wait for event delivery.
++        // ESM blocks the process in TASK_EV_WAIT state until events arrive,
++        // then delivers them directly without requiring read() syscalls.
+         //
+         // The timeout is advisory only.  If the device is asleep, it will not wake just to
+         // service the timeout.
+         mPendingEventIndex = 0;
+ 
+-        mLock.unlock(); // release lock before poll
++        _l.unlock(); // release lock before wait
+ 
+-        int pollResult = epoll_wait(mEpollFd, mPendingEventItems, EPOLL_MAX_EVENTS, timeoutMillis);
++        // ESM: Allocate buffer for ESM events (fd + input_event pairs)
++        struct esm_event esmBuffer[capacity];
++        int esmResult = esm_wait(esmBuffer, capacity, timeoutMillis);
+ 
+-        mLock.lock(); // reacquire lock after poll
++        _l.lock(); // reacquire lock after wait
+ 
+-        if (pollResult == 0) {
+-            // Timed out.
+-            mPendingEventCount = 0;
+-            break;
++        // Process ESM events by converting directly to RawEvent
++        if (esmResult > 0) {
++            ALOGV("ESM returned %d events", esmResult);
++            for (int i = 0; i < esmResult && capacity > 0; i++) {
++                const struct esm_event& esmEvent = esmBuffer[i];
++
++                // Look up device by fd
++                Device* device = getDeviceByFdLocked(esmEvent.fd);
++                if (!device) {
++                    ALOGW("ESM event from unknown fd %d, ignoring", esmEvent.fd);
++                    continue;
++                }
++
++                int32_t deviceId = device->id == mBuiltInKeyboardId ? 0 : device->id;
++                const struct input_event& iev = esmEvent.event;
++
++                // Debug: Log KEY_POWER events
++                if (iev.type == 1 && iev.code == 116) {
++                    ALOGI("ESM: KEY_POWER event - value=%d from fd=%d", iev.value, esmEvent.fd);
++                }
++
++                // Convert ESM event directly to RawEvent
++                event->when = processEventTimestamp(iev);
++                event->readTime = systemTime(SYSTEM_TIME_MONOTONIC);
++                event->deviceId = deviceId;
++                event->type = iev.type;
++                event->code = iev.code;
++                event->value = iev.value;
++                event++;
++                capacity--;
++            }
++        } else if (esmResult < 0) {
++            // ESM error occurred
++            if (errno != EINTR && errno != EAGAIN) {
++                ALOGW("esm_wait failed (errno=%d): %s\n", errno, strerror(errno));
++                usleep(100000);  // Sleep to avoid busy loop on persistent errors
++            }
+         }
+ 
+-        if (pollResult < 0) {
+-            // An error occurred.
+-            mPendingEventCount = 0;
++        // ESM: Check for inotify and wake pipe events using poll() with 0 timeout
++        // poll() is lightweight for checking a small number of fds
++        struct pollfd checkFds[2];
++        checkFds[0].fd = mINotifyFd;
++        checkFds[0].events = POLLIN;
++        checkFds[1].fd = mWakeReadPipeFd;
++        checkFds[1].events = POLLIN;
++
++        int pollResult = poll(checkFds, 2, 0);  // 0 timeout = non-blocking check
++        mPendingEventCount = 0;  // No longer using mPendingEventItems
+ 
+-            // Sleep after errors to avoid locking up the system.
+-            // Hopefully the error is transient.
+-            if (errno != EINTR) {
+-                ALOGW("poll failed (errno=%d)\n", errno);
+-                usleep(100000);
++        if (pollResult > 0) {
++            // Check inotify
++            if (checkFds[0].revents & POLLIN) {
++                mPendingINotify = true;
++                ALOGV("INotify event detected");
+             }
+-        } else {
+-            // Some events occurred.
+-            mPendingEventCount = size_t(pollResult);
++
++            // Check wake pipe
++            if (checkFds[1].revents & POLLIN) {
++                ALOGV("awoken after wake()");
++                awoken = true;
++                char wakeReadBuffer[16];
++                ssize_t nRead;
++                do {
++                    nRead = read(mWakeReadPipeFd, wakeReadBuffer, sizeof(wakeReadBuffer));
++                } while ((nRead == -1 && errno == EINTR) || nRead == sizeof(wakeReadBuffer));
++            }
++        }
++
++        // If we got events or were awoken, break to process
++        if (event != buffer || awoken || mPendingINotify) {
++            break;
++        }
++
++        // Timeout or EINTR - continue loop
++        if (esmResult == 0 || (esmResult < 0 && errno == EINTR)) {
++            break;
+         }
+     }
+ 
+@@ -1786,15 +1801,25 @@ status_t EventHub::unregisterFdFromEpoll(int fd) {
+ }
+ 
+ status_t EventHub::registerDeviceForEpollLocked(Device& device) {
+-    status_t result = registerFdForEpoll(device.fd);
+-    if (result != OK) {
+-        ALOGE("Could not add input device fd to epoll for device %" PRId32, device.id);
+-        return result;
++    // ESM: Register device for push-based event delivery
++    // Use ~0UL to register for all event types (EV_KEY, EV_REL, EV_ABS, etc.)
++    // ESM completely replaces epoll for input devices
++    int esm_result = esm_register(device.fd, ~0UL);
++    if (esm_result < 0) {
++        ALOGE("Could not register device fd %d with ESM: %s", device.fd, strerror(errno));
++        return -errno;
+     }
++
++    ALOGI("Registered device %" PRId32 " (fd %d) with ESM for push-based event delivery",
++          device.id, device.fd);
++
++    // Note: We no longer register input devices with epoll since ESM handles all event delivery
++    // Video devices still use epoll if present
+     if (device.videoDevice) {
+         registerVideoDeviceForEpollLocked(*device.videoDevice);
+     }
+-    return result;
++
++    return OK;
+ }
+ 
+ void EventHub::registerVideoDeviceForEpollLocked(const TouchVideoDevice& videoDevice) {
+@@ -1805,13 +1830,9 @@ void EventHub::registerVideoDeviceForEpollLocked(const TouchVideoDevice& videoDe
+ }
+ 
+ status_t EventHub::unregisterDeviceFromEpollLocked(Device& device) {
+-    if (device.hasValidFd()) {
+-        status_t result = unregisterFdFromEpoll(device.fd);
+-        if (result != OK) {
+-            ALOGW("Could not remove input device fd from epoll for device %" PRId32, device.id);
+-            return result;
+-        }
+-    }
++    // ESM: Input devices are not registered with epoll, only with ESM
++    // ESM cleanup is handled automatically in kernel via esm_file_close()
++    // We only need to unregister video devices from epoll if present
+     if (device.videoDevice) {
+         unregisterVideoDeviceFromEpollLocked(*device.videoDevice);
+     }
+diff --git a/services/inputflinger/reader/InputReader.cpp b/services/inputflinger/reader/InputReader.cpp
+index 10c04f606c..47ebb71bab 100644
+--- a/services/inputflinger/reader/InputReader.cpp
++++ b/services/inputflinger/reader/InputReader.cpp
+@@ -28,6 +28,7 @@
+ #include <math.h>
+ #include <stddef.h>
+ #include <stdlib.h>
++#include <sys/syscall.h>
+ #include <unistd.h>
+ #include <utils/Errors.h>
+ #include <utils/Thread.h>
+@@ -867,6 +868,21 @@ void InputReader::dump(std::string& dump) {
+ }
+ 
+ void InputReader::monitor() {
++    // ESM: Check if InputReader thread is in ESM wait state
++    // If so, it's alive and healthy - no need to wake/wait
++    if (mThread) {
++        pid_t tid = mThread->getTid();
++#ifdef __NR_is_in_esm_wait
++        int result = syscall(__NR_is_in_esm_wait, tid);
++        if (result == 1) {
++            // Thread is legitimately waiting in esm_wait() - it's alive
++            ALOGV("InputReader thread %d is in ESM wait - healthy", tid);
++            mEventHub->monitor();
++            return;
++        }
++#endif
++    }
++
+     // Acquire and release the lock to ensure that the reader has not deadlocked.
+     std::unique_lock<std::mutex> lock(mLock);
+     mEventHub->wake();

@@ -1,0 +1,153 @@
+diff --git a/services/core/java/com/android/server/Watchdog.java b/services/core/java/com/android/server/Watchdog.java
+index fcd049f1c494..45be69f133ab 100644
+--- a/services/core/java/com/android/server/Watchdog.java
++++ b/services/core/java/com/android/server/Watchdog.java
+@@ -94,6 +94,13 @@ public class Watchdog {
+     private static final String PROP_FATAL_LOOP_WINDOWS_SECS =
+             "framework_watchdog.fatal_window.second";
+ 
++    /**
++     * Native method to check if a thread is in ESM wait state.
++     * @param tid Thread ID to check
++     * @return 1 if thread is in TASK_EV_WAIT state, 0 otherwise
++     */
++    private static native int nativeIsInEsmWait(int tid);
++
+     // Which native processes to dump into dropbox's stack traces
+     public static final String[] NATIVE_STACKS_OF_INTEREST = new String[] {
+         "/system/bin/audioserver",
+@@ -176,6 +183,7 @@ public class Watchdog {
+         private Monitor mCurrentMonitor;
+         private long mStartTime;
+         private int mPauseCount;
++        private int mThreadId = -1;  // Native TID, captured when run() executes
+ 
+         HandlerChecker(Handler handler, String name, long waitMaxMillis) {
+             mHandler = handler;
+@@ -220,7 +228,27 @@ public class Watchdog {
+         }
+ 
+         boolean isOverdueLocked() {
+-            return (!mCompleted) && (SystemClock.uptimeMillis() > mStartTime + mWaitMax);
++            if (mCompleted) {
++                return false;
++            }
++
++            if (SystemClock.uptimeMillis() <= mStartTime + mWaitMax) {
++                return false;
++            }
++
++            // InputReader thread uses ESM (Event Stream Model) and legitimately waits
++            // indefinitely for input events. Check kernel state directly via syscall.
++            if (mThreadId > 0) {
++                try {
++                    if (nativeIsInEsmWait(mThreadId) == 1) {
++                        return false;
++                    }
++                } catch (Exception e) {
++                    // If syscall fails, continue with normal deadlock detection
++                }
++            }
++
++            return true;
+         }
+ 
+         public int getCompletionStateLocked() {
+@@ -256,6 +284,16 @@ public class Watchdog {
+ 
+         @Override
+         public void run() {
++            // Capture native TID on first run (this runs on the handler's thread)
++            if (mThreadId == -1) {
++                try {
++                    mThreadId = android.system.Os.gettid();
++                } catch (Exception e) {
++                    // Shouldn't happen, but handle gracefully
++                    mThreadId = -1;
++                }
++            }
++
+             // Once we get here, we ensure that mMonitors does not change even if we call
+             // #addMonitorLocked because we first add the new monitors to mMonitorQueue and
+             // move them to mMonitors on the next schedule when mCompleted is true, at which
+diff --git a/services/core/jni/Android.bp b/services/core/jni/Android.bp
+index 53401fd47178..5c9934aaf529 100644
+--- a/services/core/jni/Android.bp
++++ b/services/core/jni/Android.bp
+@@ -67,6 +67,7 @@ cc_library_static {
+         "com_android_server_UsbHostManager.cpp",
+         "com_android_server_vibrator_VibratorController.cpp",
+         "com_android_server_vibrator_VibratorManagerService.cpp",
++        "com_android_server_Watchdog.cpp",
+         "com_android_server_PersistentDataBlockService.cpp",
+         "com_android_server_am_LowMemDetector.cpp",
+         "com_android_server_pm_PackageManagerShellCommandDataLoader.cpp",
+diff --git a/services/core/jni/com_android_server_Watchdog.cpp b/services/core/jni/com_android_server_Watchdog.cpp
+new file mode 100644
+index 000000000000..b76daf4ec7a9
+--- /dev/null
++++ b/services/core/jni/com_android_server_Watchdog.cpp
+@@ -0,0 +1,51 @@
++/*
++ * Copyright (C) 2021 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#define LOG_TAG "Watchdog-JNI"
++
++#include <nativehelper/JNIHelp.h>
++#include "jni.h"
++
++#include <errno.h>
++#include <unistd.h>
++#include <sys/syscall.h>
++
++namespace android {
++
++static jint com_android_server_Watchdog_isInEsmWait(JNIEnv* env, jobject /* clazz */, jint tid) {
++#ifdef __NR_is_in_esm_wait
++    int result = syscall(__NR_is_in_esm_wait, tid);
++    if (result < 0) {
++        // Return 0 on error - assume not in ESM wait
++        return 0;
++    }
++    return result;
++#else
++    // Syscall not available on this architecture
++    return 0;
++#endif
++}
++
++static const JNINativeMethod gMethods[] = {
++    {"nativeIsInEsmWait", "(I)I", (void*)com_android_server_Watchdog_isInEsmWait},
++};
++
++int register_android_server_Watchdog(JNIEnv* env) {
++    return jniRegisterNativeMethods(env, "com/android/server/Watchdog",
++            gMethods, NELEM(gMethods));
++}
++
++} // namespace android
+diff --git a/services/core/jni/onload.cpp b/services/core/jni/onload.cpp
+index ff61abc4ff7f..e6a4c4642640 100644
+--- a/services/core/jni/onload.cpp
++++ b/services/core/jni/onload.cpp
+@@ -102,6 +102,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /* reserved */)
+     register_android_server_tv_TvUinputBridge(env);
+     register_android_server_tv_TvInputHal(env);
+     register_android_server_PersistentDataBlockService(env);
++    register_android_server_Watchdog(env);
+     register_android_server_HardwarePropertiesManagerService(env);
+     register_android_server_storage_AppFuse(env);
+     register_android_server_SyntheticPasswordManager(env);

@@ -1,0 +1,144 @@
+diff --git a/build_esm.sh b/build_esm.sh
+new file mode 100755
+index 000000000..9856e3652
+--- /dev/null
++++ b/build_esm.sh
+@@ -0,0 +1,138 @@
++#!/bin/bash
++# AOSP Build Script with ESM Kernel
++# Builds kernel first, then AOSP
++
++set -e
++
++usage() {
++    echo "USAGE: ./build.sh [OPTIONS]"
++    echo ""
++    echo "OPTIONS:"
++    echo "  -K          Build kernel"
++    echo "  -A          Build Android"
++    echo "  -j JOBS     Number of parallel jobs (default: $(nproc))"
++    echo "  -h          Show this help"
++    echo ""
++    echo "Examples:"
++    echo "  ./build.sh              # Build kernel + Android (default)"
++    echo "  ./build.sh -K -A        # Build kernel + Android (explicit)"
++    echo "  ./build.sh -j32         # Build both with 32 parallel jobs"
++    echo "  ./build.sh -K           # Build kernel only"
++    echo "  ./build.sh -A           # Build Android only"
++    echo "  ./build.sh -K -A -j32   # Build both with 32 jobs"
++    exit 1
++}
++
++# Default options
++BUILD_KERNEL=false
++BUILD_ANDROID=false
++BUILD_JOBS=$(nproc)
++
++# Parse arguments
++while getopts "KAj:h" opt; do
++    case $opt in
++        K)
++            BUILD_KERNEL=true
++            ;;
++        A)
++            BUILD_ANDROID=true
++            ;;
++        j)
++            BUILD_JOBS=$OPTARG
++            ;;
++        h)
++            usage
++            ;;
++        *)
++            usage
++            ;;
++    esac
++done
++
++# If no build targets specified, build both
++if [ "$BUILD_KERNEL" = false ] && [ "$BUILD_ANDROID" = false ]; then
++    BUILD_KERNEL=true
++    BUILD_ANDROID=true
++fi
++
++# Change to AOSP root
++cd "$(dirname "$0")"
++AOSP_ROOT=$(pwd)
++
++echo "========================================="
++echo "AOSP Build with ESM Kernel"
++echo "========================================="
++echo "Build Kernel: $BUILD_KERNEL"
++echo "Build Android: $BUILD_ANDROID"
++echo "Jobs: $BUILD_JOBS"
++echo "========================================="
++
++# Source build environment
++echo "Setting up build environment..."
++source build/envsetup.sh
++
++# Select lunch target
++echo "Selecting aosp_redfin-userdebug..."
++lunch aosp_redfin-userdebug
++
++# Build kernel if requested
++if [ "$BUILD_KERNEL" = true ]; then
++    echo ""
++    echo "========================================="
++    echo "Step 1: Building ESM Kernel"
++    echo "========================================="
++
++    rm -r out/target/product/aosp_redfin/obj/ESM_KERNEL || true
++
++    bash device/google/redfin/build_esm_kernel.sh
++
++    if [ $? -ne 0 ]; then
++        echo "ERROR: Kernel build failed!"
++        exit 1
++    fi
++
++    echo ""
++    echo "========================================="
++    echo "ESM Kernel build complete!"
++    echo "========================================="
++fi
++
++# Build AOSP if requested
++if [ "$BUILD_ANDROID" = true ]; then
++    # Verify kernel exists (support both redfin and aosp_redfin)
++    KERNEL_IMAGE="out/target/product/${TARGET_PRODUCT}/obj/ESM_KERNEL/arch/arm64/boot/Image.lz4-dtb"
++    if [ ! -f "$KERNEL_IMAGE" ]; then
++        # Try alternate product name
++        KERNEL_IMAGE_ALT="out/target/product/redfin/obj/ESM_KERNEL/arch/arm64/boot/Image.lz4-dtb"
++        if [ -f "$KERNEL_IMAGE_ALT" ]; then
++            KERNEL_IMAGE="$KERNEL_IMAGE_ALT"
++        else
++            echo ""
++            echo "ERROR: Kernel image not found at $KERNEL_IMAGE"
++            echo "Please build the kernel first with: ./build.sh -K"
++            exit 1
++        fi
++    fi
++
++    echo ""
++    echo "========================================="
++    echo "Step 2: Building AOSP"
++    echo "========================================="
++
++    time m -j${BUILD_JOBS}
++
++    if [ $? -ne 0 ]; then
++        echo "ERROR: AOSP build failed!"
++        exit 1
++    fi
++
++    echo ""
++    echo "========================================="
++    echo "Build Complete!"
++    echo "========================================="
++    echo "Output: out/target/product/redfin/"
++    echo ""
++    echo "Flash commands:"
++    echo "  adb reboot bootloader"
++    echo "  fastboot flashall -w"
++fi

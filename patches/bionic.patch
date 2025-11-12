@@ -1,0 +1,199 @@
+diff --git a/libc/SYSCALLS.TXT b/libc/SYSCALLS.TXT
+index 391e7af16..0fe966012 100644
+--- a/libc/SYSCALLS.TXT
++++ b/libc/SYSCALLS.TXT
+@@ -363,3 +363,9 @@ ssize_t getrandom(void*, size_t, unsigned) all
+ int __pidfd_open:pidfd_open(pid_t, unsigned int) all
+ int __pidfd_getfd:pidfd_getfd(int, int, unsigned int) all
+ int pidfd_send_signal(int, int, siginfo_t*, unsigned int) all
++
++# <sys/esm.h> - Event Stream Model
++int esm_register(int, unsigned long) arm,arm64
++int esm_wait(struct esm_event*, size_t, int) arm,arm64
++int esm_ctl(int, unsigned long) arm,arm64
++int is_in_esm_wait(pid_t) arm,arm64
+diff --git a/libc/include/sys/esm.h b/libc/include/sys/esm.h
+new file mode 100644
+index 000000000..c5266d39e
+--- /dev/null
++++ b/libc/include/sys/esm.h
+@@ -0,0 +1,133 @@
++/*
++ * Copyright (C) 2025 The Android Open Source Project
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *  * Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ *  * Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in
++ *    the documentation and/or other materials provided with the
++ *    distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
++ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
++ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
++ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
++ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
++ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#ifndef _SYS_ESM_H_
++#define _SYS_ESM_H_
++
++#include <sys/cdefs.h>
++#include <sys/types.h>
++#include <linux/input.h>
++
++__BEGIN_DECLS
++
++/* ESM control commands */
++#define ESM_CTL_UNREGISTER_ALL  0
++#define ESM_CTL_GET_STATS       1
++
++/* ESM statistics structure */
++struct esm_stats {
++    unsigned long events_received;
++    unsigned long events_delivered;
++    unsigned long wakeups;
++};
++
++/*
++ * ESM event structure - returned by esm_wait()
++ *
++ * This structure includes both the file descriptor and the event,
++ * so the caller knows which device the event came from.
++ */
++struct esm_event {
++    int fd;                    /* File descriptor that generated this event */
++    struct input_event event;  /* The actual input event */
++};
++
++/**
++ * esm_register - Register an input device file descriptor with ESM
++ *
++ * @fd: File descriptor of input device (e.g., from open("/dev/input/event0"))
++ * @events: Event mask specifying which event types to receive
++ *
++ * Returns: 0 on success, -1 on error (errno set)
++ *
++ * Example:
++ *   int fd = open("/dev/input/event0", O_RDONLY | O_CLOEXEC);
++ *   if (esm_register(fd, (1 << EV_KEY) | (1 << EV_ABS)) < 0) {
++ *       perror("esm_register");
++ *   }
++ */
++int esm_register(int __fd, unsigned long __events);
++
++/**
++ * esm_wait - Wait for input events on registered devices
++ *
++ * @buffer: Buffer to receive esm_event structures
++ * @count: Maximum number of events to receive
++ * @timeout_ms: Timeout in milliseconds (-1 for infinite)
++ *
++ * Returns: Number of events received, -1 on error (errno set)
++ *
++ * This function blocks until events arrive or the timeout expires.
++ * Events are batched until EV_SYN/SYN_REPORT for proper synchronization.
++ *
++ * Each event includes the fd so you know which device it came from.
++ *
++ * Example:
++ *   struct esm_event events[32];
++ *   int n = esm_wait(events, 32, -1);  // Wait forever
++ *   if (n < 0) {
++ *       perror("esm_wait");
++ *   } else {
++ *       for (int i = 0; i < n; i++) {
++ *           printf("Event from fd %d: type=%d code=%d value=%d\n",
++ *                  events[i].fd, events[i].event.type,
++ *                  events[i].event.code, events[i].event.value);
++ *       }
++ *   }
++ */
++int esm_wait(struct esm_event* __buffer, size_t __count, int __timeout_ms);
++
++/**
++ * esm_ctl - Control ESM behavior
++ *
++ * @cmd: Command to execute
++ * @arg: Command-specific argument
++ *
++ * Returns: 0 on success, -1 on error (errno set)
++ *
++ * Commands:
++ *   ESM_CTL_UNREGISTER_ALL: Unregister all devices
++ *   ESM_CTL_GET_STATS: Get statistics (arg = pointer to esm_stats)
++ */
++int esm_ctl(int __cmd, unsigned long __arg);
++
++/**
++ * is_in_esm_wait - Check if a thread is blocked in esm_wait()
++ *
++ * @tid: Thread ID to check
++ *
++ * Returns: 1 if thread is in esm_wait(), 0 if not, -1 on error (errno set)
++ *
++ * This function allows checking if a specific thread is currently blocked
++ * waiting for ESM events. Useful for debugging and monitoring.
++ */
++int is_in_esm_wait(pid_t __tid);
++
++__END_DECLS
++
++#endif /* _SYS_ESM_H_ */
+diff --git a/libc/kernel/uapi/asm-arm/asm/unistd-common.h b/libc/kernel/uapi/asm-arm/asm/unistd-common.h
+index 070c77bfd..8bf388d23 100644
+--- a/libc/kernel/uapi/asm-arm/asm/unistd-common.h
++++ b/libc/kernel/uapi/asm-arm/asm/unistd-common.h
+@@ -414,4 +414,8 @@
+ #define __NR_process_madvise (__NR_SYSCALL_BASE + 440)
+ #define __NR_epoll_pwait2 (__NR_SYSCALL_BASE + 441)
+ #define __NR_mount_setattr (__NR_SYSCALL_BASE + 442)
++#define __NR_esm_register (__NR_SYSCALL_BASE + 443)
++#define __NR_esm_wait (__NR_SYSCALL_BASE + 444)
++#define __NR_esm_ctl (__NR_SYSCALL_BASE + 445)
++#define __NR_is_in_esm_wait (__NR_SYSCALL_BASE + 446)
+ #endif
+diff --git a/libc/kernel/uapi/asm-generic/unistd.h b/libc/kernel/uapi/asm-generic/unistd.h
+index 140970150..e0b4fbd32 100644
+--- a/libc/kernel/uapi/asm-generic/unistd.h
++++ b/libc/kernel/uapi/asm-generic/unistd.h
+@@ -403,8 +403,12 @@
+ #define __NR_process_madvise 440
+ #define __NR_epoll_pwait2 441
+ #define __NR_mount_setattr 442
++#define __NR_esm_register 443
++#define __NR_esm_wait 444
++#define __NR_esm_ctl 445
++#define __NR_is_in_esm_wait 446
+ #undef __NR_syscalls
+-#define __NR_syscalls 443
++#define __NR_syscalls 447
+ #if __BITS_PER_LONG == 64 && !defined(__SYSCALL_COMPAT)
+ #define __NR_fcntl __NR3264_fcntl
+ #define __NR_statfs __NR3264_statfs
+diff --git a/libc/libc.map.txt b/libc/libc.map.txt
+index c31e30681..3429348d1 100644
+--- a/libc/libc.map.txt
++++ b/libc/libc.map.txt
+@@ -309,6 +309,10 @@ LIBC {
+     epoll_ctl;
+     epoll_pwait; # introduced=21
+     epoll_wait;
++    esm_ctl;
++    esm_register;
++    esm_wait;
++    is_in_esm_wait;
+     erand48;
+     err;
+     error; # introduced=23
